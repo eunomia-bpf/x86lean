@@ -267,7 +267,8 @@ ones really do not.
 ## Optional checked scalar memory
 
 `X86.stepChecked` and `X86.runChecked` execute a `CheckedState` around the
-existing `Cpu`. Successful numerical results come from `X86.step`; the access
+existing `Cpu`. Successful numerical results come from `X86.step` and its
+shared double-shift result helper; the access
 layer captures effective addresses using the same `Ea.addr` before execution.
 The original `Cpu`, `step`, `run` and their characterization theorems retain
 their existing domain.
@@ -285,8 +286,12 @@ CMP/TEST), extending loads, CMOV, SETcc, shifts/rotations/double shifts, flagles
 shifts/rotations, MOVBE, bit counts/scans, BZHI, ANDN, IMUL and MUL/DIV/MULX.
 BSWAP, LEA and NOP need no memory access. Zero-count memory shifts/rotations
 retain the numeric step's read-modify-write behavior, including write-permission
-checks and initialization. The existing double-shift undefined-memory result
-refusal retains its read prefix and does not invent a store.
+checks and initialization. For 16-bit SHLD/SHRD with masked counts above16,
+checked execution uses the shared result helper: six oracle flag bits followed
+by sixteen oracle result bits, written only after successful access validation.
+The observed memory bytes therefore retain the undefined result instead of
+inventing a deterministic arithmetic value. The original `step` and differential
+serialization retain their existing undefined-memory refusal and leak checks.
 
 CMOV reads a memory source even when its condition is false. After successful
 DIV/IDIV operand access, the original shared division helper determines a typed

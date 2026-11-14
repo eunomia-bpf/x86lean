@@ -1368,6 +1368,39 @@ theorem about a VEX form keeps its proof, and only its statement gains the `.vex
       let a := ea.addr s nr
       (s.setYmm dst (vabsApply w (s.readMem128 a)) (vabsApply w (s.readMem128 (a + 16)))).setRip nr
 
+/-- Shared double-shift result calculation, including the SDM's undefined
+result branch. The default step retains its differential-harness memory refusal;
+the checked entry can expose oracle-chosen memory bytes after validating access.
+No arithmetic or flag rule is duplicated by that access layer. -/
+@[simp] def dshiftResult (k : DShiftKind) (sz : Size) (dst : Operand) (src : GPR)
+    (n : Nat) (nr : Val) (s : Cpu) : Cpu :=
+  let a := s.readOperand sz nr dst
+  if n = 0 then
+    -- The write-back with the unchanged value, and NO FLAG: see D54.
+    (s.writeOperand sz nr dst a).setRip nr
+  else if sz.bits < n then
+    -- THE BAD-PARAMETERS BRANCH.  SEVEN draws: the six flags in the fixed
+    -- order CF, PF, AF, ZF, SF, OF — `divFlags`' order, because it is the
+    -- same six — and then the destination's `sz.bits` bits.  The order is
+    -- part of the model exactly as the shifts' three draws are.
+    let (cfU, s) := s.undefBit
+    let (pfU, s) := s.undefBit
+    let (afU, s) := s.undefBit
+    let (zfU, s) := s.undefBit
+    let (sfU, s) := s.undefBit
+    let (ofU, s) := s.undefBit
+    let (u, s) := s.undefVal sz.bits
+    ((s.setFlags (Flags.dshiftBadFlags cfU pfU afU zfU sfU ofU s.flags)).writeOperand
+      sz nr dst u).setRip nr
+  else
+    let b := s.getReg sz src
+    let res := Flags.dshiftRes k sz a b n
+    -- TWO draws, in the fixed order OF, AF.
+    let (ofU, s) := s.undefBit
+    let (afU, s) := s.undefBit
+    let s := s.setFlags (Flags.dshiftFlags k sz a res n ofU afU s.flags)
+    (s.writeOperand sz nr dst res).setRip nr
+
 /-- The small-step transition.  A stopped model does not move. -/
 def step (i : Instr) (s : Cpu) (addressWidth : LinearAddressWidth := .la48) : Cpu :=
   if s.stopped then s else
@@ -2929,35 +2962,10 @@ def step (i : Instr) (s : Cpu) (addressWidth : LinearAddressWidth := .la48) : Cp
           | .imm8 v => v
           | .cl => (s.getReg .b .rcx).setWidth 8
         let n := Flags.shiftCount sz cnt
-        let a := s.readOperand sz nr dst
         if dshiftMemUndefined sz dst.isMem n then
           s.halt (.unimplemented
             "shld/shrd: an undefined RESULT in memory (16-bit operand, count > 16)")
-        else if n = 0 then
-          -- The write-back with the unchanged value, and NO FLAG: see D54.
-          (s.writeOperand sz nr dst a).setRip nr
-        else if sz.bits < n then
-          -- THE BAD-PARAMETERS BRANCH.  SEVEN draws: the six flags in the fixed
-          -- order CF, PF, AF, ZF, SF, OF — `divFlags`' order, because it is the
-          -- same six — and then the destination's `sz.bits` bits.  The order is
-          -- part of the model exactly as the shifts' three draws are.
-          let (cfU, s) := s.undefBit
-          let (pfU, s) := s.undefBit
-          let (afU, s) := s.undefBit
-          let (zfU, s) := s.undefBit
-          let (sfU, s) := s.undefBit
-          let (ofU, s) := s.undefBit
-          let (u, s) := s.undefVal sz.bits
-          ((s.setFlags (Flags.dshiftBadFlags cfU pfU afU zfU sfU ofU s.flags)).writeOperand
-            sz nr dst u).setRip nr
-        else
-          let b := s.getReg sz src
-          let res := Flags.dshiftRes k sz a b n
-          -- TWO draws, in the fixed order OF, AF.
-          let (ofU, s) := s.undefBit
-          let (afU, s) := s.undefBit
-          let s := s.setFlags (Flags.dshiftFlags k sz a res n ofU afU s.flags)
-          (s.writeOperand sz nr dst res).setRip nr
+        else dshiftResult k sz dst src n nr s
 
 /-- Run `n` steps of a straight-line list of decoded instructions, taking each
 in order.  P0 does not fetch-and-decode from memory (that is P4's Lean decoder);

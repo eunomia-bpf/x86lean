@@ -82,6 +82,91 @@ private def check (c : Case) (ci : Nat) : Bool :=
       after.readable a == p.readable a && after.writable a == p.writable a &&
       after.initialized a == (if success && 1 <= n && n <= c.writeBytes then true else p.initialized a)))
 
+-- The result and six arithmetic flags are independent oracle bits. Literal
+-- projections detect draw order, cursor, byte ordering and surrounding-state
+-- corruption without treating the default harness refusal as an oracle.
+private def undefinedMemoryResult (kind : DShiftKind) (count : BitVec 8) (cl : Bool)
+    (pattern : Val) (mode : Nat) (target : Val := 0x1000)
+    (operand : Ea := { base := some .rbx }) : Bool :=
+  let cpu := entry target initial
+  let cpu := { cpu with
+    regs := cpu.regs.set .rcx (if cl then count.setWidth 64 else 0xdeadbeef)
+    oracle := { bits := fun n => pattern.getLsbD (n-9), cursor := 9 } }
+  let p := profile { op := .nop none, base := target, readBytes := 2, writeBytes := 2 } mode
+  let amount := if cl then ShiftAmt.cl else .imm8 count
+  let i : Instr := { op := .dshift kind .w (.mem operand) .rax amount, len := 3 }
+  let t := stepChecked i { cpu, profile := some p, events := [prior] }
+  let rd := mode == 1 || mode == 2 || mode == 5
+  let wr := mode == 3 || mode == 4 || mode == 5
+  let fault := if rd then some (ExecutionFault.read target 2) else if wr then some (.write target 2) else none
+  let value := pattern >>> 6
+  let want := { cpu with
+    flags := { cpu.flags with
+      cf := pattern.getLsbD 0
+      pf := pattern.getLsbD 1
+      af := pattern.getLsbD 2
+      zf := pattern.getLsbD 3
+      sf := pattern.getLsbD 4
+      of := pattern.getLsbD 5 }
+    oracle := { cpu.oracle with cursor := 31 }
+    mem := cpu.mem.writeSize .w target value
+    rip := 0x4003 }
+  let reads := if rd then [] else [MemoryAccessEvent.memory .read target [0x11,0x22] (mode != 6 && mode != 7)]
+  let tail := match fault with | some f => [.fault f] | none => [.memory .write target (bytes 2 value) true]
+  t.fault == fault && t.cpu.ms.isNone && sameCpu t.cpu (if fault.isNone then want else cpu) &&
+  t.events == [prior] ++ reads ++ tail &&
+  (List.range 32).all (fun n => t.cpu.oracle.bits n == cpu.oracle.bits n) &&
+  (match t.profile with | none => false | some after => (List.range 5).all (fun n =>
+    let a := target-1+BitVec.ofNat 64 n
+    after.readable a == p.readable a && after.writable a == p.writable a &&
+    after.initialized a == (if fault.isNone && 1 <= n && n <= 2 then true else p.initialized a)))
+
+-- Every undefined 16-bit masked count, both instructions and CL/immediate,
+-- with first/last-byte read/write failures and actual uninitialized bytes.
+example : (List.range 15).all (fun n => [false,true].all (fun cl =>
+    (List.range 8).all (undefinedMemoryResult .shld (BitVec.ofNat 8 (n+17)) cl 0x2aaaaa))) = true := by decide
+example : (List.range 15).all (fun n => [false,true].all (fun cl =>
+    (List.range 8).all (undefinedMemoryResult .shrd (BitVec.ofNat 8 (n+17)) cl 0x155555))) = true := by decide
+
+-- One independent bit at each of the six flag and sixteen result positions.
+example : (List.range 22).all (fun n => [DShiftKind.shld,.shrd].all (fun k =>
+    [false,true].all (fun cl => undefinedMemoryResult k 17 cl (1 <<< n) 0))) = true := by decide
+example : ([0,0x3fffff,0x2aaaaa,0x155555] : List Val).all (fun bits =>
+    [DShiftKind.shld,.shrd].all (fun k => [false,true].all (fun cl =>
+      undefinedMemoryResult k 31 cl bits 6))) = true := by decide
+
+-- High count bits are masked; RIP/FS/GS and unaligned addresses use pre-state EA.
+example : ([49,63,145,159,241,255] : List (BitVec 8)).all (fun count =>
+    [DShiftKind.shld,.shrd].all (fun k => [false,true].all (fun cl =>
+      undefinedMemoryResult k count cl 0x2aaaaa 0))) = true := by decide
+example : (([({ base := some .rbx, seg := some .fs } : Ea),
+    { base := some .rbx, seg := some .gs }, { ripRel := true, disp := 16 },
+    { base := some .rbx, disp := 1 }] : List Ea).zip [0x3000,0x4000,0x4013,0x1001] |>.all (fun (operand,target) =>
+      [DShiftKind.shld,.shrd].all (fun k => [false,true].all (fun cl =>
+        undefinedMemoryResult k 17 cl 0x155555 7 target operand)))) = true := by decide
+
+-- Earlier canonicality/missing-profile/illegal-LOCK checks neither draw bits
+-- nor turn undefined results into a successful zero/default store.
+example : [DShiftKind.shld,.shrd].all (fun k =>
+    let cpu := entry address initial
+    let i : Instr := { op := .dshift k .w memory .rax (.imm8 17), len := 3 }
+    let t := stepChecked i { cpu, events := [prior] }
+    t.cpu.ms.isSome && t.fault.isNone && sameCpu { t.cpu with ms := none } cpu && t.events == [prior]) = true := by decide
+example : [DShiftKind.shld,.shrd].all (fun k =>
+    let a : Val := 0x7fffffffffff
+    let cpu := { entry a initial with regs := (entry a initial).regs.set .rbx a }
+    let i : Instr := { op := .dshift k .w memory .rax (.imm8 31), len := 3 }
+    let t := stepChecked i { cpu, profile := some {}, events := [prior] }
+    t.fault == some (.nonCanonical a) && t.cpu.ms.isNone && sameCpu t.cpu cpu &&
+    t.events == [prior,.fault (.nonCanonical a)]) = true := by decide
+example : [DShiftKind.shld,.shrd].all (fun k =>
+    let cpu := entry address initial
+    let i : Instr := { op := .dshift k .w (.mem { ea with lock := true }) .rax (.imm8 17), len := 3 }
+    let t := stepChecked i { cpu, profile := some {}, events := [prior] }
+    t.fault == some .invalidOpcode && t.cpu.ms.isNone && sameCpu t.cpu cpu &&
+    t.events == [prior,.fault .invalidOpcode]) = true := by decide
+
+
 private def moves : List Case := [
   { op := .mov .b (.reg .rax) memory, readBytes := 1, rax := some 0x1122334455667711 },
   { op := .mov .b memory (.reg .rax), writeBytes := 1, stored := input },
@@ -409,8 +494,8 @@ example : ([.shift .shl .d (.reg .rax) (.imm8 0), .rot .rcr .d (.reg .rax) (.imm
       t.fault.isNone && t.cpu.ms.isNone && t.profile.isNone && t.events == [prior] &&
       sameCpu t.cpu (step i cpu)) = true := by decide
 
--- Double-shift undefined memory results remain a MODEL refusal after the read,
--- even with write permission denied. An earlier read fault takes precedence.
+-- Undefined-result double shifts validate the final store after the read.
+-- Denied stores preserve CPU/oracle state and the successful read prefix.
 example : [DShiftKind.shld,.shrd].all (fun k => [17,31].all (fun count =>
     [false,true].all (fun deny =>
       let cpu := entry address initial
@@ -419,9 +504,8 @@ example : [DShiftKind.shld,.shrd].all (fun k => [17,31].all (fun count =>
       let t := stepChecked i { cpu, profile := some p, events := [prior] }
       if deny then t.fault == some (.read address 2) && t.cpu.ms.isNone && sameCpu t.cpu cpu &&
         t.events == [prior,.fault (.read address 2)]
-      else (match t.cpu.ms with | some (.unimplemented _) => true | _ => false) &&
-        t.fault.isNone && sameCpu { t.cpu with ms := none } cpu &&
-        t.events == [prior,.memory .read address [0x11,0x22] false]))) = true := by decide
+      else t.cpu.ms.isNone && t.fault == some (.write address 2) && sameCpu t.cpu cpu &&
+        t.events == [prior,.memory .read address [0x11,0x22] false,.fault (.write address 2)]))) = true := by decide
 
 -- Invalid encodings/ASTs are refused before looking up capabilities.
 example : ([.shift .shl .q (.imm 0) (.imm8 1), .rot .ror .q (.imm 0) (.imm8 1),
@@ -1161,5 +1245,6 @@ example : (List.range 3).all (fun scene =>
     t.cpu.regs.rax == (if scene == 0 then input else initial) &&
     t.cpu.mem.readSize .q address == (if scene == 0 then initial else input) &&
     t.cpu.rip == (if scene == 0 then 0x4007 else 0x4003)) = true := by decide
+
 
 end X86.Tests.CheckedAccess

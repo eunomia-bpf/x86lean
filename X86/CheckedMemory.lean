@@ -2,7 +2,7 @@
 # Checked flat-memory execution over the existing numeric step
 
 The access layer validates and observes transfers; arithmetic/register/flag
-semantics are executed by X86.step itself. The original Cpu and step domain
+semantics are executed by X86.step and its shared double-shift result helper. The original Cpu and step domain
 are unchanged. This is not MMU translation, concurrency or exception entry.
 -/
 import X86.Semantics
@@ -107,15 +107,10 @@ private def accessPlan (i : Instr) (s : Cpu) : Except MsErr AccessPlan :=
   | .shift _ sz dst _ | .rot _ sz dst _ =>
     if dst.isImm then .error (.illegalOperands "Invalid checked shift/rotate destination")
     else .ok { reads := (spanFor s nr sz dst).toList, store := spanFor s nr sz dst }
-  | .dshift _ sz dst _ amt =>
+  | .dshift _ sz dst _ _ =>
     if !dshiftEncodable sz || dst.isImm then
       .error (.illegalOperands "Invalid checked double-shift destination/width")
-    else
-      let count := match amt with | .imm8 value => value | .cl => (s.getReg .b .rcx).setWidth 8
-      let undefinedMemory := dshiftMemUndefined sz dst.isMem (Flags.shiftCount sz count)
-      -- The shared step refuses this result AFTER reading. Do not validate a
-      -- store it will not perform, or turn that model refusal into a fault.
-      .ok { reads := (spanFor s nr sz dst).toList, store := if undefinedMemory then none else spanFor s nr sz dst }
+    else .ok { reads := (spanFor s nr sz dst).toList, store := spanFor s nr sz dst }
   | .shiftx _ sz _ src _ | .rorx sz _ src _ | .bzhi sz _ src _
   | .andn sz _ _ src | .mulx sz _ _ src =>
     sourcePlan (sz == .d || sz == .q) s nr sz src
@@ -239,8 +234,21 @@ private def divisionFault (i : Instr) (s : Cpu) : Bool :=
       (s.readOperand sz (s.rip + BitVec.ofNat 64 i.len) src)).isNone
   | _ => false
 
+/-- Keep the original harness refusal in step, while exposing the same
+oracle-driven result branch to checked memory. Access and encoding validation
+precede this call. The numeric rule itself lives beside the default step. -/
+private def checkedResult (i : Instr) (s : Cpu) (width : LinearAddressWidth) : Cpu :=
+  match i.op with
+  | .dshift k sz dst src amt =>
+    let count := match amt with | .imm8 value => value | .cl => (s.getReg .b .rcx).setWidth 8
+    let n := Flags.shiftCount sz count
+    if dshiftMemUndefined sz dst.isMem n then
+      dshiftResult k sz dst src n (s.rip + BitVec.ofNat 64 i.len) s
+    else step i s width
+  | _ => step i s width
+
 /-- Execute a supported instruction with checked effects. Every successful
-numeric result comes from the original step. A denied final store retains the
+numeric result comes from the original step or its shared result helper. A denied final store retains the
 read prefix, while registers/flags/memory/oracle/PC do not commit. A missing or
 unported capability is MsErr, distinct from a checked access fault. -/
 def stepChecked (i : Instr) (s : CheckedState) : CheckedState :=
@@ -262,7 +270,7 @@ def stepChecked (i : Instr) (s : CheckedState) : CheckedState :=
         match plan.store with | none => checked | some span => validate .write span checked
       if checked.stopped then checked else
       if divisionFault i checked.cpu then fail checked .divideError else
-        commit plan s checked (step i checked.cpu checked.addressWidth)
+        commit plan s checked (checkedResult i checked.cpu checked.addressWidth)
 
 def runChecked (instructions : List Instr) (s : CheckedState) : CheckedState :=
   instructions.foldl (fun state instruction => stepChecked instruction state) s

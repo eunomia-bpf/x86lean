@@ -159,3 +159,16 @@ legal LOCK arithmetic/unary/bit forms are classified by the existing lockable
 predicate. Values/flags still use the original step. Atomicity is RECORDED,
 not a new proof of concurrency or memory ordering (existing TRUSTBASE scope).
 No private material or manual/foreign model code copied.
+
+### 2026-11-14: checked undefined double-shift memory results
+
+Intel SDM SHLD/SHRD describes results beyond operand size as undefined; this is
+already the fork's original register-result oracle rule in Semantics.lean
+(D52/D54), using six flag draws then one operand-width value draw. The existing
+rule is factored into dshiftResult so checked memory uses that same calculation
+and exposes its actual bytes after read/write validation. No deterministic
+replacement for undefined bits is introduced. Original step/serialization keep
+their D52 memory refusal; their existing differential leak gate is unchanged.
+The public Intel manual reference remains
+https://cdrdv2-public.intel.com/671110/325383-sdm-vol-2abcd.pdf .
+No foreign model or manual text copied; no private source consulted.
