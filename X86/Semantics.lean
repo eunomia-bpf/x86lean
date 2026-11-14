@@ -211,6 +211,26 @@ def popValue (s : Cpu) (sz : Size) : Val × Cpu :=
 
 end Cpu
 
+/-- Shared near-target resolution for numerical and checked execution. -/
+@[simp] def JmpTarget.resolve (target : JmpTarget) (s : Cpu) (nr : Val) : Val :=
+  match target with
+  | .rel displacement => nr + displacement
+  | .indirect source => s.readOperand .q nr source
+
+/-- Counter observations shared with the checked control-flow boundary. -/
+@[simp] def Cpu.jcxzTaken (s : Cpu) (addr32 : Bool) : Bool :=
+  (if addr32 then Value.trunc .d (s.regs.get .rcx) else s.regs.get .rcx) == 0
+
+@[simp] def Cpu.loopCount (s : Cpu) (addr32 : Bool) : Val :=
+  let size : Size := if addr32 then .d else .q
+  Value.trunc size (s.getReg size .rcx - 1)
+
+@[simp] def LoopKind.taken (kind : LoopKind) (count : Val) (zf : Bool) : Bool :=
+  match kind with
+  | .loop => count != 0
+  | .loope => count != 0 && zf
+  | .loopne => count != 0 && !zf
+
 /-- ⭐⭐ D331: THE BYTE A BIT-STRING BT/BTS/BTR/BTC ADDRESSES — a memory bit base `ea`
 with the register offset `r` at operand size `sz`.  The offset is SIGNED at `sz`, and the
 byte is `EA + (offset SAR 3)` (SDM Vol. 2A §3.1.1.9, Table 3-2: `BitBase + offset DIV 8`,
@@ -2153,10 +2173,7 @@ def step (i : Instr) (s : Cpu) (addressWidth : LinearAddressWidth := .la48) : Cp
       (s.writeOperand sz nr dst v).setRip nr
 
   -- JMP Jcc CALL (SDM Vol. 2A).  "Flags Affected: None" for all three.
-  | .jmp t =>
-      match t with
-      | .rel d => s.setRipChecked (nr + d) addressWidth
-      | .indirect o => s.setRipChecked (s.readOperand .q nr o) addressWidth
+  | .jmp t => s.setRipChecked (t.resolve s nr) addressWidth
   | .jcc c d =>
       if c.eval s.flags then s.setRipChecked (nr + d) addressWidth else s.setRip nr
   -- JRCXZ / JECXZ (SDM Vol. 2A, JCC).  ⚠️ THE ONLY BRANCH WHOSE CONDITION IS A
@@ -2167,8 +2184,7 @@ def step (i : Instr) (s : Cpu) (addressWidth : LinearAddressWidth := .la48) : Cp
   -- in the state space and is this batch's planted hard half.
   -- "Flags Affected: None."
   | .jcxz addr32 d =>
-      let c := if addr32 then Value.trunc .d (s.regs.get .rcx) else s.regs.get .rcx
-      if c == 0 then s.setRipChecked (nr + d) addressWidth else s.setRip nr
+      if s.jcxzTaken addr32 then s.setRipChecked (nr + d) addressWidth else s.setRip nr
   -- SETcc (SDM Vol. 2A, SETcc): ONE BYTE, 1 or 0.  "Flags Affected: None."
   | .setcc c dst =>
       (s.writeOperand .b nr dst (if c.eval s.flags then 1 else 0)).setRip nr
@@ -2289,15 +2305,10 @@ def step (i : Instr) (s : Cpu) (addressWidth : LinearAddressWidth := .la48) : Cp
       -- counter write-back is sequenced first below, so naming it now is what
       -- makes the independence explicit rather than accidental.
       let zf := s.flags.zf
-      let cnt := s.getReg sz .rcx
-      let cnt' := Value.trunc sz (cnt - 1)
+      let cnt' := s.loopCount addr32
       -- the write-back happens on BOTH paths, so it is sequenced before the test
       let s := s.setReg sz .rcx cnt'
-      let taken :=
-        match k with
-        | .loop   => cnt' != 0
-        | .loope  => cnt' != 0 && zf
-        | .loopne => cnt' != 0 && !zf
+      let taken := k.taken cnt' zf
       if taken then s.setRipChecked (nr + d) addressWidth else s.setRip nr
 
   -- CLC / STC / CMC / CLD / STD (SDM Vol. 2A).  Each writes ONE flag; "all
@@ -2541,21 +2552,12 @@ def step (i : Instr) (s : Cpu) (addressWidth : LinearAddressWidth := .la48) : Cp
           s'.setRip (if r.terminates s'.flags.zf then nr else s.rip)
 
   | .call t =>
-      match t with
-      | .rel d =>
-          -- ⚠️ THE CHECK COMES FIRST.  x86isa raises #GP(0) BEFORE the return
-          -- address is pushed, so a refused call must not have pushed either —
-          -- the first run disagreed on `rsp` and on the stack window as well as
-          -- on `rip`, which is what says the ordering is observable and not a
-          -- detail.
-          if canonical (nr + d) addressWidth then (s.push .q nr).setRip (nr + d)
-          else s.halt (.unimplemented "non-canonical branch target (#GP(0) in hardware)")
-      | .indirect o =>
-          -- the target is read BEFORE the return address is pushed, so a
-          -- `call [rsp]` reads the pre-push stack.
-          let tgt := s.readOperand .q nr o
-          if canonical tgt addressWidth then (s.push .q nr).setRip tgt
-          else s.halt (.unimplemented "non-canonical branch target (#GP(0) in hardware)")
+      -- Check the target BEFORE pushing, including an indirect source read
+      -- through the incoming RSP. This ordering is observable on refusal and
+      -- when the source aliases the return-address slot (SDM CALL).
+      let target := t.resolve s nr
+      if canonical target addressWidth then (s.push .q nr).setRip target
+      else s.halt (.unimplemented "non-canonical branch target (#GP(0) in hardware)")
 
   -- MUL · IMUL · DIV · IDIV, the ONE-OPERAND forms (SDM Vol. 2A).  See
   -- `MulDivKind` and `Cpu.setMdPair`.

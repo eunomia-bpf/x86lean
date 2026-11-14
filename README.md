@@ -293,8 +293,17 @@ DIV/IDIV operand access, the original shared division helper determines a typed
 divide-error outcome (zero divisor or quotient overflow), preserving the CPU
 and read prefix. UD2 and illegal LOCK uses have a typed invalid-opcode outcome.
 Missing profiles and unported classes produce `MsErr` model refusals, with no
-total-memory fallback. Stack/control transfers, bit-test/string/vector accesses
-and atomic/LOCK operations remain unported to this optional entry point.
+total-memory fallback. Near PUSH/POP (16/64 bits), CALL/RET, JMP, Jcc,
+JCXZ and LOOP are also supported. Target/count predicates are shared with the
+numeric step. PUSH captures its source before decrementing RSP; POP computes
+its memory destination from the incremented stack frame. Indirect target reads
+precede target validation, which precedes CALL's stack store. A noncanonical
+RET target keeps its stack-read event without popping. A typed LOOP target
+fault keeps the incoming counter, while the default step retains its original
+model-refusal behavior. Successful transfers use the original numerical step.
+These are the existing CET-disabled near forms, without far transfers, shadow
+stacks or instruction fetch. Bit-test/string/vector accesses and atomic/LOCK
+operations remain unported to this optional entry point.
 `Tests.CheckedAccess` checks ordered faults/effects and both numerical-step
 agreement and independent load/store values using kernel `decide`.
 

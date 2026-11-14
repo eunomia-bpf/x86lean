@@ -59,6 +59,7 @@ Instructions with intermediate commits need their own shared iteration seam. -/
 private structure AccessPlan where
   reads : List AccessSpan := []
   store : Option AccessSpan := none
+  target : Option Val := none
 
 private def spanFor (s : Cpu) (nr : Val) (size : Size) : Operand → Option AccessSpan
   | .mem ea => some { address := ea.addr s nr, size }
@@ -119,6 +120,26 @@ private def accessPlan (i : Instr) (s : Cpu) : Except MsErr AccessPlan :=
     if sz == .b || !(dst.isMem != src.isMem) || dst.isImm || src.isImm then
       .error (.illegalOperands "Invalid checked MOVBE operands/width")
     else .ok { reads := (spanFor s nr sz src).toList, store := spanFor s nr sz dst }
+  | .push sz src =>
+    if sz != .w && sz != .q then .error (.illegalOperands "Invalid checked PUSH width")
+    else .ok { reads := (spanFor s nr sz src).toList, store := some { address := s.regs.get .rsp - BitVec.ofNat 64 sz.bytes, size := sz } }
+  | .pop sz dst =>
+    if (sz != .w && sz != .q) || dst.isImm then .error (.illegalOperands "Invalid checked POP operands/width")
+    else .ok { reads := [{ address := s.regs.get .rsp, size := sz }], store := spanFor (s.popValue sz).2 nr sz dst }
+  | .jmp target | .call target =>
+    match target with
+    | .indirect (.imm _) => .error (.illegalOperands "Invalid checked indirect target")
+    | _ =>
+      let reads := match target with | .rel _ => [] | .indirect src => (spanFor s nr .q src).toList
+      let store := match i.op with
+        | .call _ => some { address := s.regs.get .rsp - 8, size := Size.q }
+        | _ => none
+      .ok { reads, store, target := some (target.resolve s nr) }
+  | .ret => .ok { reads := [{ address := s.regs.get .rsp, size := .q }], target := some (s.readMem .q (s.regs.get .rsp)) }
+  | .jcc condition displacement => .ok { target := if condition.eval s.flags then some (nr + displacement) else none }
+  | .jcxz addr32 displacement => .ok { target := if s.jcxzTaken addr32 then some (nr + displacement) else none }
+  | .loop kind addr32 displacement =>
+    .ok { target := if kind.taken (s.loopCount addr32) s.flags.zf then some (nr + displacement) else none }
   | _ => .error (.unimplemented "Checked access is not yet supported for this instruction class")
 
 private def permitted (p : Val → Bool) (span : AccessSpan) : Bool :=
@@ -193,6 +214,10 @@ def stepChecked (i : Instr) (s : CheckedState) : CheckedState :=
     | .ok plan =>
       let checked := plan.reads.foldl (fun state span =>
         if state.stopped then state else validate .read span state) s
+      let checked := if checked.stopped then checked else
+        match plan.target with
+        | some target => if canonical target checked.addressWidth then checked else fail checked (.nonCanonical target)
+        | none => checked
       let checked := if checked.stopped then checked else
         match plan.store with | none => checked | some span => validate .write span checked
       if checked.stopped then checked else

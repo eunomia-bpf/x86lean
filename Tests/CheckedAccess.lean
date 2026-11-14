@@ -485,4 +485,222 @@ example : [Size.b,.w,.d,.q].all (fun sz => [MulDivKind.mul,.imul].all (fun k =>
     t.cpu.getReg sz .rax == 21 && t.cpu.mdHi sz == 0 &&
     t.events == [prior,.memory .read address (bytes sz.bytes 3) true])) = true := by decide
 
+
+private def stackEntry (sp : Val := 0x2000) : Cpu :=
+  let cpu := entry address initial
+  { cpu with
+    regs := cpu.regs.set .rsp sp,
+    mem := ((cpu.mem.writeSize .q sp 0x6000).writeSize .q (sp-8) 0x7000).write (sp+16) 0x5a }
+
+private structure StackCase where
+  op : Op
+  cpu : Cpu := stackEntry 0x2000
+  size : Size := .q
+  readAddress : Option Val := none
+  writeAddress : Option Val := none
+  readValue : Val := 0x6000
+  writeValue : Val := input
+  rsp : Val
+  rax : Option Val := none
+  rip : Val := 0x4003
+
+private def checkStack (c : StackCase) (mode : Nat) : Bool :=
+  let ra := c.readAddress.getD 0
+  let wa := c.writeAddress.getD 0
+  let p : MemoryProfile :=
+    { readable := fun a => !((mode == 1 || mode == 2 || mode == 5) && a == ra + (if mode == 2 then BitVec.ofNat 64 (c.size.bytes-1) else 0)),
+      writable := fun a => !((mode == 3 || mode == 4 || mode == 5) && a == wa + (if mode == 4 then BitVec.ofNat 64 (c.size.bytes-1) else 0)),
+      initialized := fun a => mode != 7 && (mode != 8 || a == ra) }
+  let i : Instr := { op := c.op, len := 3 }
+  let t := stepChecked i { cpu := c.cpu, profile := if mode == 6 then none else some p, events := [prior] }
+  let deniedRead := c.readAddress.isSome && (mode == 1 || mode == 2 || mode == 5)
+  let deniedWrite := c.writeAddress.isSome && (mode == 3 || mode == 4 || mode == 5)
+  let fault := if mode == 6 then none else if deniedRead then some (ExecutionFault.read ra c.size.bytes)
+    else if deniedWrite then some (.write wa c.size.bytes) else none
+  let success := mode != 6 && fault.isNone
+  let readEvents := if mode != 6 && c.readAddress.isSome && !deniedRead then
+    [MemoryAccessEvent.memory .read ra (bytes c.size.bytes c.readValue) (mode != 7 && mode != 8)] else []
+  let tail := match fault with
+    | some f => [MemoryAccessEvent.fault f]
+    | none => if success && c.writeAddress.isSome then [.memory .write wa (bytes c.size.bytes c.writeValue) true] else []
+  t.fault == fault && t.events == [prior] ++ readEvents ++ tail &&
+  if mode == 6 then t.cpu.ms.isSome && sameCpu { t.cpu with ms := none } c.cpu && t.profile.isNone
+  else t.cpu.ms.isNone && sameCpu t.cpu (if success then step i c.cpu else c.cpu) &&
+    (if success then t.cpu.regs.rsp == c.rsp && t.cpu.rip == c.rip &&
+      (match c.rax with | none => true | some value => t.cpu.regs.rax == value) else true) &&
+    (if c.writeAddress.isSome then (List.range (c.size.bytes+2)).all (fun n =>
+      let a := wa-1+BitVec.ofNat 64 n
+      t.cpu.mem.read a == (if success && 1 <= n && n <= c.size.bytes then
+        (c.writeValue >>> (8*(n-1))).setWidth 8 else c.cpu.mem.read a) &&
+      (match t.profile with | none => false | some after => after.readable a == p.readable a && after.writable a == p.writable a && after.initialized a == (if success && 1 <= n && n <= c.size.bytes then true else p.initialized a))) else true)
+
+private def stackCases : List StackCase := [
+  { op := .push .q (.reg .rax), writeAddress := some 0x1ff8, rsp := 0x1ff8 },
+  { op := .push .w (.reg .rax), size := .w, writeAddress := some 0x1ffe, rsp := 0x1ffe },
+  { op := .push .q (.imm 0x8899), writeAddress := some 0x1ff8, writeValue := 0x8899, rsp := 0x1ff8 },
+  { op := .push .q (.reg .rsp), writeAddress := some 0x1ff8, writeValue := 0x2000, rsp := 0x1ff8 },
+  { op := .push .q (.mem { base := some .rsp }), readAddress := some 0x2000, writeAddress := some 0x1ff8, writeValue := 0x6000, rsp := 0x1ff8 },
+  { op := .push .q (.mem { base := some .rsp, disp := -8 }), readAddress := some 0x1ff8, readValue := 0x7000, writeAddress := some 0x1ff8, writeValue := 0x7000, rsp := 0x1ff8 },
+  { op := .pop .q (.reg .rax), readAddress := some 0x2000, rsp := 0x2008, rax := some 0x6000 },
+  { op := .pop .w (.reg .rax), size := .w, readAddress := some 0x2000, rsp := 0x2002, rax := some 0x1122334455666000 },
+  { op := .pop .q (.reg .rsp), readAddress := some 0x2000, rsp := 0x6000 },
+  { op := .pop .w (.reg .rsp), size := .w, readAddress := some 0x2000, rsp := 0x6000 },
+  { op := .pop .w (.reg .rsp), cpu := stackEntry 0xffff, size := .w, readAddress := some 0xffff, rsp := 0x16000 },
+  { op := .pop .w (.reg .rsp), cpu := stackEntry 0xffff800000002000, size := .w, readAddress := some 0xffff800000002000, rsp := 0xffff800000006000 },
+  { op := .pop .q (.mem { base := some .rsp }), readAddress := some 0x2000, writeAddress := some 0x2008, writeValue := 0x6000, rsp := 0x2008 },
+  { op := .pop .w (.mem { base := some .rsp }), size := .w, readAddress := some 0x2000, writeAddress := some 0x2002, writeValue := 0x6000, rsp := 0x2002 },
+  { op := .pop .q (.mem { base := some .rsp, disp := -8 }), readAddress := some 0x2000, writeAddress := some 0x2000, writeValue := 0x6000, rsp := 0x2008 },
+  { op := .call (.rel 0x1ffd), writeAddress := some 0x1ff8, writeValue := 0x4003, rsp := 0x1ff8, rip := 0x6000 },
+  { op := .call (.indirect (.reg .rsp)), writeAddress := some 0x1ff8, writeValue := 0x4003, rsp := 0x1ff8, rip := 0x2000 },
+  { op := .call (.indirect (.mem { base := some .rsp })), readAddress := some 0x2000, writeAddress := some 0x1ff8, writeValue := 0x4003, rsp := 0x1ff8, rip := 0x6000 },
+  { op := .call (.indirect (.mem { base := some .rsp, disp := -8 })), readAddress := some 0x1ff8, readValue := 0x7000, writeAddress := some 0x1ff8, writeValue := 0x4003, rsp := 0x1ff8, rip := 0x7000 },
+  { op := .ret, readAddress := some 0x2000, rsp := 0x2008, rip := 0x6000 }
+]
+example : (stackCases.take 10).all (fun c => (List.range 9).all (checkStack c)) = true := by decide
+example : (stackCases.drop 10).all (fun c => (List.range 9).all (checkStack c)) = true := by decide
+
+private def targets : List (Val × Bool × Bool) := [
+  (0,true,true), (0x00007fffffffffff,true,true), (0x0000800000000000,false,true),
+  (0x00ffffffffffffff,false,true), (0x0100000000000000,false,false),
+  (0xff00000000000000,false,true), (0xffff800000000000,true,true), (0xffffffffffffffff,true,true)
+]
+
+private def checkControl (kind : Nat) : Bool := targets.all (fun (target,lo,hi) =>
+  [(LinearAddressWidth.la48,lo),(.la57,hi)].all (fun (width,valid) =>
+    [false,true].all (fun taken => (List.range 4).all (fun mode =>
+      let cpu := stackEntry 0x2000
+      let cpu :=
+        { cpu with
+          regs := ((cpu.regs.set .rdx target).set .rcx (if kind == 8 then (if taken then 0 else 1) else if taken then 2 else 1)),
+          flags := { cpu.flags with zf := taken },
+          mem := (cpu.mem.writeSize .q address target).writeSize .q 0x2000 target }
+      let op := match kind with
+        | 0 => Op.jmp (.rel (target-0x4003))
+        | 1 => .jmp (.indirect (.reg .rdx))
+        | 2 => .jmp (.indirect memory)
+        | 3 => .call (.rel (target-0x4003))
+        | 4 => .call (.indirect (.reg .rdx))
+        | 5 => .call (.indirect memory)
+        | 6 => .ret
+        | 7 => .jcc .e (target-0x4003)
+        | 8 => .jcxz false (target-0x4003)
+        | _ => .loop .loop false (target-0x4003)
+      let read := kind == 2 || kind == 5 || kind == 6
+      let store := kind == 3 || kind == 4 || kind == 5
+      let ra : Val := if kind == 6 then 0x2000 else address
+      let p : MemoryProfile := { readable := fun _ => mode != 1, writable := fun _ => mode != 2 }
+      let i : Instr := { op, len := 3 }
+      let t := stepChecked i { cpu, addressWidth := width, profile := if mode == 3 then none else some p, events := [prior] }
+      let readMissing := read && mode == 3
+      let readDenied := read && mode == 1
+      let badTarget := !readMissing && !readDenied && (kind < 7 || taken) && !valid
+      let storeMissing := !readMissing && !readDenied && !badTarget && store && mode == 3
+      let storeDenied := !readMissing && !readDenied && !badTarget && store && mode == 2
+      let modelRefusal := readMissing || storeMissing
+      let fault := if readDenied then some (ExecutionFault.read ra 8)
+        else if badTarget then some (.nonCanonical target)
+        else if storeDenied then some (.write 0x1ff8 8) else none
+      let success := !modelRefusal && fault.isNone
+      let events := [prior] ++ (if read && !readMissing && !readDenied then
+          [.memory .read ra (bytes 8 target) false] else []) ++
+        (match fault with | some f => [.fault f] | none => if success && store then [.memory .write 0x1ff8 (bytes 8 0x4003) true] else [])
+      t.events == events && t.fault == fault &&
+      if modelRefusal then t.cpu.ms.isSome && sameCpu { t.cpu with ms := none } cpu
+      else t.cpu.ms.isNone && sameCpu t.cpu (if success then step i cpu width else cpu) &&
+        (if success then t.cpu.rip == (if kind < 7 || taken then target else 0x4003) &&
+          t.cpu.regs.rsp == (if store then 0x1ff8 else if kind == 6 then 0x2008 else 0x2000) else true)))))
+
+example : checkControl 0 = true := by decide
+example : checkControl 1 = true := by decide
+example : checkControl 2 = true := by decide
+example : checkControl 3 = true := by decide
+example : checkControl 4 = true := by decide
+example : checkControl 5 = true := by decide
+example : checkControl 6 = true := by decide
+example : checkControl 7 = true := by decide
+example : checkControl 8 = true := by decide
+example : checkControl 9 = true := by decide
+
+-- LOOP's fault boundary must not commit its speculative counter decrement.
+-- On success the 32-bit count write zero-extends, including not-taken branches.
+private def checkLoop (kind : LoopKind) : Bool := [false,true].all (fun addr32 =>
+  [false,true].all (fun zf => ([0,1,2,0x100000000,0x100000001] : List Val).all (fun count =>
+    [false,true].all (fun bad =>
+      let base := stackEntry 0x2000
+      let cpu := { base with regs := base.regs.set .rcx count, flags := { zf } }
+      let after : Val := if addr32 then (count-1) % 0x100000000 else count-1
+      let taken : Bool := after != 0 && (match kind with | .loop => true | .loope => zf | .loopne => !zf)
+      let target : Val := if bad then 0x0100000000000000 else 0x7000
+      let i : Instr := { op := .loop kind addr32 (target-0x4003), len := 3 }
+      let t := stepChecked i { cpu, events := [prior] }
+      let fault := if taken && bad then some (ExecutionFault.nonCanonical target) else none
+      t.fault == fault && t.cpu.ms.isNone &&
+      sameCpu t.cpu (if fault.isNone then step i cpu else cpu) &&
+      t.events == [prior] ++ (match fault with | none => [] | some f => [.fault f]) &&
+      (if fault.isNone then t.cpu.regs.rcx == after else t.cpu.regs.rcx == count)))))
+example : checkLoop .loop = true := by decide
+example : checkLoop .loope = true := by decide
+example : checkLoop .loopne = true := by decide
+
+-- ECX zero with nonzero RCX is the address-size distinction for JECXZ.
+example : [false,true].all (fun addr32 =>
+    ([0,1,0x100000000,0x100000001] : List Val).all (fun count => [false,true].all (fun bad =>
+      let base := stackEntry 0x2000
+      let cpu := { base with regs := base.regs.set .rcx count }
+      let take := (if addr32 then count % 0x100000000 else count) == 0
+      let target : Val := if bad then 0x0100000000000000 else 0x7000
+      let i : Instr := { op := .jcxz addr32 (target-0x4003), len := 3 }
+      let t := stepChecked i { cpu, events := [prior] }
+      let fault := if take && bad then some (ExecutionFault.nonCanonical target) else none
+      t.fault == fault && t.cpu.ms.isNone && t.cpu.regs.rcx == count &&
+      sameCpu t.cpu (if fault.isNone then step i cpu else cpu) &&
+      t.events == [prior] ++ (match fault with | none => [] | some f => [.fault f])))) = true := by decide
+
+private def stackBounds : List (Val × Bool × Bool × Bool × Bool) := [
+  (0,true,true,true,true), (0x7ffffffffff8,true,true,true,true),
+  (0x7fffffffffff,true,false,true,true), (0x800000000000,true,false,true,true),
+  (0x800000000008,false,false,true,true), (0x00ffffffffffffff,false,false,true,false),
+  (0x0100000000000000,false,false,true,false), (0xffff800000000000,false,true,true,true),
+  (0xffffffffffffffff,true,true,true,true)
+]
+example : stackBounds.all (fun (sp,p48,r48,p57,r57) =>
+    [(LinearAddressWidth.la48,p48,r48),(.la57,p57,r57)].all (fun (width,pushValid,popValid) =>
+      [false,true].all (fun push => [false,true].all (fun deny =>
+        let cpu := stackEntry sp
+        let base := if push then sp-8 else sp
+        let valid := if push then pushValid else popValid
+        let p : MemoryProfile := { readable := fun _ => !deny, writable := fun _ => !deny }
+        let i : Instr := { op := if push then .push .q (.reg .rax) else .pop .q (.reg .rax), len := 3 }
+        let t := stepChecked i { cpu, addressWidth := width, profile := some p, events := [prior] }
+        let fault := if !valid then some (ExecutionFault.nonCanonical base)
+          else if deny then some (if push then .write base 8 else .read base 8) else none
+        t.fault == fault && t.cpu.ms.isNone && sameCpu t.cpu (if fault.isNone then step i cpu width else cpu) &&
+        t.events == [prior] ++ (match fault with | some f => [.fault f] | none => [.memory (if push then .write else .read) base (bytes 8 (if push then input else 0x6000)) push]))))) = true := by decide
+
+example : ([Op.push .b (.reg .rax), .push .d (.reg .rax), .pop .b (.reg .rax),
+    .pop .d (.reg .rax), .pop .q (.imm 0), .pop .w (.imm 0),
+    .jmp (.indirect (.imm 0)), .call (.indirect (.imm 0))] : List Op).all (fun op =>
+      [false,true].all (fun bound =>
+        let cpu := stackEntry 0x2000
+        let p : MemoryProfile := { readable := fun _ => false, writable := fun _ => false }
+        let t := stepChecked { op, len := 3 } { cpu, profile := if bound then some p else none, events := [prior] }
+        (match t.cpu.ms with | some (.illegalOperands _) => true | _ => false) &&
+        sameCpu { t.cpu with ms := none } cpu && t.fault.isNone && t.events == [prior])) = true := by decide
+
+example : [false,true].all (fun denyReturn =>
+    let cpu := stackEntry 0x2000
+    let p : MemoryProfile := {}
+    let call : Instr := { op := .call (.rel 0x1ffd), len := 3 }
+    let ret : Instr := { op := .ret, len := 1 }
+    let s := stepChecked call { cpu, profile := some p, events := [prior] }
+    let s := { s with profile := s.profile.map (fun p => { p with readable := fun _ => !denyReturn }) }
+    let t := runChecked [ret,{ op := .nop none, len := 1 }] s
+    let fault := if denyReturn then some (ExecutionFault.read 0x1ff8 8) else none
+    t.fault == fault && t.cpu.ms.isNone &&
+    sameCpu t.cpu (if denyReturn then step call cpu else step { op := .nop none, len := 1 } (step ret (step call cpu))) &&
+    t.cpu.regs.rsp == (if denyReturn then 0x1ff8 else 0x2000) &&
+    t.cpu.rip == (if denyReturn then 0x6000 else 0x4004) &&
+    t.events == [prior,.memory .write 0x1ff8 (bytes 8 0x4003) true] ++
+      (if denyReturn then [.fault (.read 0x1ff8 8)] else [.memory .read 0x1ff8 (bytes 8 0x4003) true])) = true := by decide
+
 end X86.Tests.CheckedAccess

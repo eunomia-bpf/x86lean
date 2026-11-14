@@ -109,3 +109,20 @@ Value.divPairU/divPairS Option result as the original step to classify that
 outcome after operand access; no new division algorithm or manual text copied.
 The combined revision089 PDF fetch was too large; the above public primary
 excerpts were used. No secondary model code was consulted or copied.
+
+### 2026-11-14: checked stack and near control
+
+Existing Cpu.push/popValue/readOperand, branch target and count predicates were
+read and reused. Shared target/count definitions are extracted from the numeric
+step so checked execution does not invent another branch/count interpreter.
+Intel SDM (already registered), public indexed POP and LOOP entries were read:
+https://cdrdv2-public.intel.com/671110/325383-sdm-vol-2abcd.pdf (POP destination
+EA after stack increment) and
+https://www.intel.com/content/dam/www/public/us/en/documents/manuals/64-ia-32-architectures-software-developer-vol-2a-manual.pdf
+(LOOP noncanonical-target fault). Combined revision090 Vol3A exception
+classification at https://cdrdv2-public.intel.com/874240/325462-090-sdm-vol-1-2abcd-3abcd-4.pdf
+informed preservation of pre-instruction CPU state on a typed fault. Numeric
+model-refusal behavior remains distinct, including its LOOP counter write.
+These are flat near transfers in the existing CET-disabled domain; no segment
+loads, far transfers, exception entry, MMU or shadow stack added. No source
+text or foreign implementation copied; no private source consulted.
