@@ -2265,8 +2265,15 @@ def step (i : Instr) (s : Cpu) (addressWidth : LinearAddressWidth := .la48) : Cp
       else
         let va := s.readOperand sz nr a
         let vb := s.readOperand sz nr b
-        let s := s.writeOperand sz nr a vb
-        ((s.writeOperand sz nr b va).setRip nr)
+        match b with
+        | .mem ea =>
+            -- Capture the address before the first register write: that
+            -- register may also be a base/index of the memory operand.
+            let address := ea.addr s nr
+            ((s.writeOperand sz nr a vb).writeMem sz address va).setRip nr
+        | _ =>
+            let s := s.writeOperand sz nr a vb
+            ((s.writeOperand sz nr b va).setRip nr)
 
   -- BSWAP (SDM Vol. 2A).  ⛔ "the result of BSWAP with a 16-bit operand size is
   -- undefined" — so this model REFUSES `.b` and `.w` rather than answering.

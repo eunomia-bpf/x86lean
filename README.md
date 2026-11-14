@@ -316,8 +316,16 @@ MOVS and REP MOVS expose the original step's single iteration. Reads precede
 stores; a fault keeps completed earlier iterations and the pending count,
 pointers and PC. The original extra count-zero step advances past REP MOVS.
 Overlapping copies see earlier writes and their initialization metadata.
-Atomic/LOCK operations and other unported classes still refuse; other string
-and SIMD classes are outside this extension's scope.
+Memory XCHG (with or without explicit LOCK) and legal LOCK binary/unary/bit
+RMWs emit one `MemoryAccessEvent.rmw` with the actual old/new bytes and old
+initialization status. Failed writes retain their read prefix and leave the
+CPU unchanged; successful stores initialize the exact range. Register-only
+XCHG needs no memory profile. The numerical XCHG step captures a second memory
+operand's address before updating a register that may also be its base/index;
+whole-state characterization and operand-order equivalence theorems cover it.
+Atomicity is recorded, as in the existing TRUSTBASE, rather than proved as a
+concurrent memory-ordering model. Other unported classes still refuse; other
+string/SIMD classes are outside this extension's scope.
 `Tests.CheckedAccess` checks ordered faults/effects and both numerical-step
 agreement and independent load/store values using kernel `decide`.
 

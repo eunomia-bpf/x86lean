@@ -1139,6 +1139,24 @@ theorem step_xchg_mem_reg (sz : Size) (ea : Ea) (r : GPR) (h : Live s) :
         (s.rip + BitVec.ofNat 64 len)) := by
   simp [step, h, Cpu.getReg, Operand.isMem, Operand.isImm, wellFormed2]
 
+/-- Both reads and the memory address precede the register write, even when
+that register is a base or index of the second operand. -/
+theorem step_xchg_reg_mem (sz : Size) (ea : Ea) (r : GPR) (h8 : Bool) (h : Live s) :
+    step ⟨.xchg sz (.reg r h8) (.mem ea), len⟩ s =
+      (((s.writeOperand sz (s.rip + BitVec.ofNat 64 len) (.reg r h8)
+          (s.readOperand sz (s.rip + BitVec.ofNat 64 len) (.mem ea))).writeMem
+          sz (ea.addr s (s.rip + BitVec.ofNat 64 len)) (s.getReg sz r h8)).setRip
+        (s.rip + BitVec.ofNat 64 len)) := by
+  simp [step, h, Cpu.readOperand, Operand.isMem, Operand.isImm, wellFormed2]
+
+/-- The two AST operand orders denote the same exchange, including base/index
+aliasing; this is a whole-state statement over arbitrary incoming values. -/
+theorem xchg_mem_operand_order (sz : Size) (ea : Ea) (r : GPR) (h8 : Bool) (h : Live s) :
+    step ⟨.xchg sz (.reg r h8) (.mem ea), len⟩ s =
+      step ⟨.xchg sz (.mem ea) (.reg r h8), len⟩ s := by
+  simp [step, h, Cpu.readOperand, Cpu.writeOperand, Cpu.writeMem, Cpu.setReg,
+    Cpu.getReg, Cpu.setRip, Operand.isMem, Operand.isImm, wellFormed2]
+
 @[simp] theorem step_bswap_flags (sz : Size) (r : GPR) (h : Live s) :
     (step ⟨.bswap sz r, len⟩ s).flags = s.flags := by
   cases sz <;> simp [step, h, Cpu.setReg, Cpu.setRip, Cpu.halt]

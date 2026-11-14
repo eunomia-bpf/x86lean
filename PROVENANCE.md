@@ -144,3 +144,18 @@ rule, so they are not included in this MOVS extension. No manual text or other
 model implementation copied; no private source read. Bit access footprint is
 that of the actual fork step (register index: selected byte, immediate: operand
 unit); the separate native word/byte observation relation belongs to migration.
+
+### 2026-11-14: captured XCHG address and checked atomic RMW
+
+The fork's register-first XCHG read both values before writing, but re-evaluated
+its memory EA after the register write. An executable counterexample (RAX=0x1000,
+[0x1000]=0x6000) wrote [0x6000] instead of[0x1000]. Capture the second memory address
+before either write; old memory-first and register-register rules are retained.
+Public Intel SDM (registered), XCHG/LOCK indexed excerpts were consulted:
+https://cdrdv2-public.intel.com/929356/334569-093-sdm-vol-2d.pdf and
+https://cdrdv2-public.intel.com/671110/325383-sdm-vol-2abcd.pdf .
+Memory XCHG uses the locking protocol with/without explicit LOCK; supported
+legal LOCK arithmetic/unary/bit forms are classified by the existing lockable
+predicate. Values/flags still use the original step. Atomicity is RECORDED,
+not a new proof of concurrency or memory ordering (existing TRUSTBASE scope).
+No private material or manual/foreign model code copied.

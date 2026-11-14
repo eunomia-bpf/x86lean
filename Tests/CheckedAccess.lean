@@ -953,4 +953,213 @@ example : ([Op.vload .dqu .x0 { base := some .rbx }, .vstore .dqa { base := some
       let t := stepChecked { op, len := 3 } { cpu, events := [prior] }
       t.cpu.ms.isSome && t.fault.isNone && t.events == [prior] && sameCpu { t.cpu with ms := none } cpu) = true := by decide
 
+
+-- Successful atomic transfers are one old/new observation. A denied store
+-- keeps its successful read prefix and commits no CPU/memory/ghost update.
+private def checkRmw (op : Op) (cpu : Cpu) (a : Val) (n : Nat) (old new : Val)
+    (rax : Option Val) (mode : Nat) : Bool :=
+  let p := profile { op, base := a, readBytes := n, writeBytes := n } mode
+  let i : Instr := { op, len := 3 }
+  let t := stepChecked i { cpu, profile := some p, events := [prior] }
+  let readDenied := mode == 1 || mode == 2 || mode == 5
+  let writeDenied := mode == 3 || mode == 4 || mode == 5
+  let fault := if readDenied then some (ExecutionFault.read a n)
+    else if writeDenied then some (.write a n) else none
+  let initialized := mode != 6 && (mode != 7 || n == 1)
+  let events := [prior] ++ (match fault with
+    | none => [.rmw a (bytes n old) (bytes n new) initialized]
+    | some f => (if readDenied then [] else [.memory .read a (bytes n old) initialized]) ++ [.fault f])
+  t.fault == fault && t.cpu.ms.isNone && t.events == events &&
+  sameCpu t.cpu (if fault.isNone then step i cpu else cpu) &&
+  (if fault.isNone then match rax with | none => true | some value => t.cpu.regs.rax == value else true) &&
+  (List.range (n+2)).all (fun offset =>
+    let b := a-1+BitVec.ofNat 64 offset
+    let written := fault.isNone && 1 <= offset && offset <= n
+    t.cpu.mem.read b == (if written then (new >>> (8*(offset-1))).setWidth 8 else cpu.mem.read b) &&
+    (match t.profile with | none => false | some after => after.readable b == p.readable b && after.writable b == p.writable b && after.initialized b == (if written then true else p.initialized b)))
+
+private def lockedCases : List Case := [
+  { op := .bin .add .b (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 1, stored := 0x12 },
+  { op := .bin .sub .b (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 1, stored := 0x10 },
+  { op := .bin .adc .b (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 1, stored := 0x13 },
+  { op := .bin .sbb .b (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 1, stored := 0xf },
+  { op := .bin .and .b (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 1, stored := 0x1 },
+  { op := .bin .or .b (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 1, stored := 0x11 },
+  { op := .bin .xor .b (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 1, stored := 0x10 },
+  { op := .un .inc .b (.mem { base := some .rbx, lock := true }), readBytes := 1, stored := 0x12 },
+  { op := .un .dec .b (.mem { base := some .rbx, lock := true }), readBytes := 1, stored := 0x10 },
+  { op := .un .neg .b (.mem { base := some .rbx, lock := true }), readBytes := 1, stored := 0xef },
+  { op := .un .not .b (.mem { base := some .rbx, lock := true }), readBytes := 1, stored := 0xee },
+  { op := .bin .add .w (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 2, stored := 0x2212 },
+  { op := .bin .sub .w (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 2, stored := 0x2210 },
+  { op := .bin .adc .w (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 2, stored := 0x2213 },
+  { op := .bin .sbb .w (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 2, stored := 0x220f },
+  { op := .bin .and .w (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 2, stored := 0x1 },
+  { op := .bin .or .w (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 2, stored := 0x2211 },
+  { op := .bin .xor .w (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 2, stored := 0x2210 },
+  { op := .un .inc .w (.mem { base := some .rbx, lock := true }), readBytes := 2, stored := 0x2212 },
+  { op := .un .dec .w (.mem { base := some .rbx, lock := true }), readBytes := 2, stored := 0x2210 },
+  { op := .un .neg .w (.mem { base := some .rbx, lock := true }), readBytes := 2, stored := 0xddef },
+  { op := .un .not .w (.mem { base := some .rbx, lock := true }), readBytes := 2, stored := 0xddee },
+  { op := .bit .bts .w (.mem { base := some .rbx, lock := true }) (.imm 1), readBytes := 2, stored := 0x2213 },
+  { op := .bit .btr .w (.mem { base := some .rbx, lock := true }) (.imm 1), readBytes := 2, stored := 0x2211 },
+  { op := .bit .btc .w (.mem { base := some .rbx, lock := true }) (.imm 1), readBytes := 2, stored := 0x2213 },
+  { op := .bin .add .d (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 4, stored := 0x44332212 },
+  { op := .bin .sub .d (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 4, stored := 0x44332210 },
+  { op := .bin .adc .d (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 4, stored := 0x44332213 },
+  { op := .bin .sbb .d (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 4, stored := 0x4433220f },
+  { op := .bin .and .d (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 4, stored := 0x1 },
+  { op := .bin .or .d (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 4, stored := 0x44332211 },
+  { op := .bin .xor .d (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 4, stored := 0x44332210 },
+  { op := .un .inc .d (.mem { base := some .rbx, lock := true }), readBytes := 4, stored := 0x44332212 },
+  { op := .un .dec .d (.mem { base := some .rbx, lock := true }), readBytes := 4, stored := 0x44332210 },
+  { op := .un .neg .d (.mem { base := some .rbx, lock := true }), readBytes := 4, stored := 0xbbccddef },
+  { op := .un .not .d (.mem { base := some .rbx, lock := true }), readBytes := 4, stored := 0xbbccddee },
+  { op := .bit .bts .d (.mem { base := some .rbx, lock := true }) (.imm 1), readBytes := 4, stored := 0x44332213 },
+  { op := .bit .btr .d (.mem { base := some .rbx, lock := true }) (.imm 1), readBytes := 4, stored := 0x44332211 },
+  { op := .bit .btc .d (.mem { base := some .rbx, lock := true }) (.imm 1), readBytes := 4, stored := 0x44332213 },
+  { op := .bin .add .q (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 8, stored := 0x8877665544332212 },
+  { op := .bin .sub .q (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 8, stored := 0x8877665544332210 },
+  { op := .bin .adc .q (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 8, stored := 0x8877665544332213 },
+  { op := .bin .sbb .q (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 8, stored := 0x887766554433220f },
+  { op := .bin .and .q (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 8, stored := 0x1 },
+  { op := .bin .or .q (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 8, stored := 0x8877665544332211 },
+  { op := .bin .xor .q (.mem { base := some .rbx, lock := true }) (.reg .rcx), readBytes := 8, stored := 0x8877665544332210 },
+  { op := .un .inc .q (.mem { base := some .rbx, lock := true }), readBytes := 8, stored := 0x8877665544332212 },
+  { op := .un .dec .q (.mem { base := some .rbx, lock := true }), readBytes := 8, stored := 0x8877665544332210 },
+  { op := .un .neg .q (.mem { base := some .rbx, lock := true }), readBytes := 8, stored := 0x778899aabbccddef },
+  { op := .un .not .q (.mem { base := some .rbx, lock := true }), readBytes := 8, stored := 0x778899aabbccddee },
+  { op := .bit .bts .q (.mem { base := some .rbx, lock := true }) (.imm 1), readBytes := 8, stored := 0x8877665544332213 },
+  { op := .bit .btr .q (.mem { base := some .rbx, lock := true }) (.imm 1), readBytes := 8, stored := 0x8877665544332211 },
+  { op := .bit .btc .q (.mem { base := some .rbx, lock := true }) (.imm 1), readBytes := 8, stored := 0x8877665544332213 }
+]
+private def checkLocked (cases : List Case) : Bool := cases.all (fun c => (List.range 8).all (fun mode =>
+  checkRmw c.op (entry address initial) address c.readBytes initial c.stored (some input) mode))
+example : checkLocked (lockedCases.take 14) = true := by decide
+example : checkLocked ((lockedCases.drop 14).take 14) = true := by decide
+example : checkLocked ((lockedCases.drop 28).take 14) = true := by decide
+example : checkLocked (lockedCases.drop 42) = true := by decide
+
+example : [Size.w,.d,.q].all (fun sz => [BitKind.bts,.btr,.btc].all (fun k =>
+    (List.range 8).all (fun mode =>
+      let base : Val := 0xfff
+      let cpu := entry base 0x81
+      let cpu := { cpu with regs := cpu.regs.set .rcx (-1) }
+      checkRmw (.bit k sz (.mem { base := some .rbx, lock := true }) (.reg .rcx)) cpu base 1 0x81
+        (if k == .bts then 0x81 else 1) (some input) mode))) = true := by decide
+
+private def checkXchg (sz : Size) : Bool := [address,address+1].all (fun a =>
+  [false,true].all (fun reverse => [false,true].all (fun locked => (List.range 8).all (fun mode =>
+    let base := entry a initial
+    let cpu := { base with regs := base.regs.set .rbx a }
+    let mem : Operand := .mem { base := some .rbx, lock := locked }
+    let op := if reverse then Op.xchg sz mem (.reg .rax) else .xchg sz (.reg .rax) mem
+    let gold : Val := match sz with
+      | .b => 0x1122334455667711 | .w => 0x1122334455662211
+      | .d => 0x44332211 | .q => initial
+    checkRmw op cpu a sz.bytes initial input (some gold) mode))))
+example : checkXchg .b = true := by decide
+example : checkXchg .w = true := by decide
+example : checkXchg .d = true := by decide
+example : checkXchg .q = true := by decide
+
+private structure XchgAlias where
+  size : Size := .q
+  high : Bool := false
+  before : Val := 0x1000
+  address : Val := 0x1000
+  ea : Ea := { base := some .rax }
+  source : Val := 0x6000
+  after : Val := 0x6000
+  stored : Val := 0x1000
+
+private def xchgAliases : List XchgAlias := [
+  { size := .b, source := 0x44, after := 0x1044, stored := 0 },
+  { size := .w, source := 0x3344, after := 0x3344 },
+  { size := .d, source := 0x11223344, after := 0x11223344 },
+  {},
+  { size := .b, high := true, source := 0x44, after := 0x4400, stored := 0x10 },
+  { before := 0xffff800000001000, address := 0xffff800000001000, stored := 0xffff800000001000 },
+  { address := 0x3000, ea := { base := some .rbx, index := some .rax, scale := .s2 } },
+  { address := 0x4013, ea := { ripRel := true, disp := 16 } },
+  { address := 0x3000, ea := { base := some .rax, seg := some .fs } }
+]
+private def checkXchgAlias (c : XchgAlias) : Bool :=
+  [false,true].all (fun reverse => [false,true].all (fun locked => (List.range 8).all (fun mode =>
+    let seed := entry c.address c.source
+    let cpu := { seed with regs := seed.regs.set .rax c.before, mem := seed.mem.writeSize .q c.after 0xaabbccddeeff7788 }
+    let mem : Operand := .mem { c.ea with lock := locked }
+    let reg : Operand := .reg .rax c.high
+    let op := if reverse then Op.xchg c.size mem reg else .xchg c.size reg mem
+    checkRmw op cpu c.address c.size.bytes c.source c.stored (some c.after) mode &&
+      (stepChecked { op, len := 3 } { cpu, profile := some (profile { op, base := c.address, readBytes := c.size.bytes, writeBytes := c.size.bytes } mode) }).cpu.mem.readSize .q c.after == 0xaabbccddeeff7788)))
+example : (xchgAliases.take 5).all checkXchgAlias = true := by decide
+example : (xchgAliases.drop 5).all checkXchgAlias = true := by decide
+
+-- Register-only ModR/M XCHG, including same-register and AH/AL views; a 90h
+-- encoding is separately decoded as NOP and is not what these ASTs assert.
+example : ([(Op.xchg .b (.reg .rax) (.reg .rbx),0x1122334455667700,0x1088),
+    (.xchg .w (.reg .rax) (.reg .rbx),0x1122334455661000,0x7788),
+    (.xchg .d (.reg .rax) (.reg .rbx),0x1000,0x55667788),
+    (.xchg .q (.reg .rax) (.reg .rbx),0x1000,input),
+    (.xchg .b (.reg .rax) (.reg .rax true),0x1122334455668877,0x1000),
+    (.xchg .d (.reg .rax) (.reg .rax),0x55667788,0x1000),
+    (.xchg .q (.reg .rax) (.reg .rax),input,0x1000)] : List (Op × Val × Val)).all (fun (op,rax,rbx) =>
+      let cpu := entry address initial
+      let i : Instr := { op, len := 3 }
+      let t := stepChecked i { cpu, events := [prior] }
+      t.fault.isNone && t.cpu.ms.isNone && t.profile.isNone && t.events == [prior] &&
+      sameCpu t.cpu (step i cpu) && t.cpu.regs.rax == rax && t.cpu.regs.rbx == rbx) = true := by decide
+
+example : spans.all (fun (a,lo,hi) => [(LinearAddressWidth.la48,lo),(.la57,hi)].all (fun (width,valid) =>
+    [false,true].all (fun reverse => [false,true].all (fun locked => (List.range 3).all (fun mode =>
+      let seed := entry a initial
+      let cpu := { seed with regs := seed.regs.set .rbx a }
+      let mem : Operand := .mem { base := some .rbx, lock := locked }
+      let op := if reverse then Op.xchg .q mem (.reg .rax) else .xchg .q (.reg .rax) mem
+      let p : MemoryProfile := { readable := fun _ => mode != 1, writable := fun _ => mode != 2 }
+      let i : Instr := { op, len := 3 }
+      let t := stepChecked i { cpu, addressWidth := width, profile := some p, events := [prior] }
+      let fault := if !valid then some (ExecutionFault.nonCanonical a)
+        else if mode == 1 then some (.read a 8) else if mode == 2 then some (.write a 8) else none
+      let events := [prior] ++ (match fault with
+        | none => [.rmw a (bytes 8 initial) (bytes 8 input) false]
+        | some f => (if valid && mode == 2 then [.memory .read a (bytes 8 initial) false] else []) ++ [.fault f])
+      t.fault == fault && t.cpu.ms.isNone && t.events == events &&
+      sameCpu t.cpu (if fault.isNone then step i cpu width else cpu)))))) = true := by decide
+
+example : ([Op.xchg .q (.imm 1) (.reg .rax), .xchg .q (.reg .rax) (.imm 1),
+    .xchg .q memory memory, .xchg .b (.imm 1) memory] : List Op).all (fun op =>
+      [false,true].all (fun bound =>
+        let cpu := entry address initial
+        let p : MemoryProfile := { readable := fun _ => false, writable := fun _ => false }
+        let t := stepChecked { op, len := 3 } { cpu, profile := if bound then some p else none, events := [prior] }
+        (match t.cpu.ms with | some (.illegalOperands _) => true | _ => false) &&
+        t.fault.isNone && t.events == [prior] && sameCpu { t.cpu with ms := none } cpu)) = true := by decide
+
+example : [false,true].all (fun reverse => [false,true].all (fun locked =>
+    let cpu := entry address initial
+    let mem : Operand := .mem { base := some .rbx, lock := locked }
+    let op := if reverse then Op.xchg .q mem (.reg .rax) else .xchg .q (.reg .rax) mem
+    let t := stepChecked { op, len := 3 } { cpu, events := [prior] }
+    t.cpu.ms.isSome && t.fault.isNone && t.events == [prior] && sameCpu { t.cpu with ms := none } cpu)) = true := by decide
+
+example : (List.range 3).all (fun scene =>
+    let cpu := entry address initial
+    let p : MemoryProfile := {}
+    let i : Instr := { op := .xchg .q (.reg .rax) memory, len := 3 }
+    let s := stepChecked i { cpu, profile := some p, events := [prior] }
+    let s := { s with profile := s.profile.map (fun p => { p with readable := fun _ => scene != 1, writable := fun _ => scene != 2 }) }
+    let t := runChecked [i,{ op := .nop none, len := 1 }] s
+    let fault := if scene == 1 then some (ExecutionFault.read address 8) else if scene == 2 then some (.write address 8) else none
+    let events := [prior,.rmw address (bytes 8 initial) (bytes 8 input) false] ++
+      (match fault with
+        | none => [.rmw address (bytes 8 input) (bytes 8 initial) true]
+        | some f => (if scene == 2 then [.memory .read address (bytes 8 input) true] else []) ++ [.fault f])
+    t.fault == fault && t.cpu.ms.isNone && t.events == events &&
+    sameCpu t.cpu (if scene == 0 then step { op := .nop none, len := 1 } (step i (step i cpu)) else step i cpu) &&
+    t.cpu.regs.rax == (if scene == 0 then input else initial) &&
+    t.cpu.mem.readSize .q address == (if scene == 0 then initial else input) &&
+    t.cpu.rip == (if scene == 0 then 0x4007 else 0x4003)) = true := by decide
+
 end X86.Tests.CheckedAccess

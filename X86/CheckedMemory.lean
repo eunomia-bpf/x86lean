@@ -33,6 +33,7 @@ inductive MemoryAccessKind where
 
 inductive MemoryAccessEvent where
   | memory (kind : MemoryAccessKind) (address : Val) (value : List (BitVec 8)) (initialized : Bool)
+  | rmw (address : Val) (before after : List (BitVec 8)) (initialized : Bool)
   | fault (reason : ExecutionFault)
   deriving DecidableEq, BEq, Repr
 
@@ -62,6 +63,7 @@ private structure AccessPlan where
   reads : List AccessSpan := []
   store : Option AccessSpan := none
   target : Option Val := none
+  rmw : Bool := false
 
 private def spanFor (s : Cpu) (nr : Val) (size : Size) : Operand → Option AccessSpan
   | .mem ea => some { address := ea.addr s nr, bytes := size.bytes }
@@ -77,7 +79,6 @@ CMOV memory sources are read even when the value is not selected (Intel SDM
 CMOVcc operation: the source read precedes condition evaluation). -/
 private def accessPlan (i : Instr) (s : Cpu) : Except MsErr AccessPlan :=
   let nr := s.rip + BitVec.ofNat 64 i.len
-  if i.op.anyLocked then .error (.unimplemented "Checked atomic/LOCK access is not yet supported") else
   match i.op with
   | .nop _ | .lea .. => .ok {}
   | .mov sz dst src =>
@@ -87,10 +88,10 @@ private def accessPlan (i : Instr) (s : Cpu) : Except MsErr AccessPlan :=
     if !wellFormed2 dst src || dst.isImm then .error (.illegalOperands "Invalid checked binary operands")
     else .ok
       { reads := (spanFor s nr sz dst).toList ++ (spanFor s nr sz src).toList,
-        store := if k == .cmp || k == .test then none else spanFor s nr sz dst }
+        store := if k == .cmp || k == .test then none else spanFor s nr sz dst, rmw := i.op.anyLocked }
   | .un _ sz dst =>
     if dst.isImm then .error (.illegalOperands "Invalid checked unary destination")
-    else .ok { reads := (spanFor s nr sz dst).toList, store := spanFor s nr sz dst }
+    else .ok { reads := (spanFor s nr sz dst).toList, store := spanFor s nr sz dst, rmw := i.op.anyLocked }
   | .movx _ _ ssz _ src =>
     if src.isImm then .error (.illegalOperands "Invalid checked extending-load source")
     else .ok { reads := (spanFor s nr ssz src).toList }
@@ -99,6 +100,9 @@ private def accessPlan (i : Instr) (s : Cpu) : Except MsErr AccessPlan :=
   | .setcc _ dst =>
     if dst.isImm then .error (.illegalOperands "Invalid checked SETcc destination")
     else .ok { store := spanFor s nr .b dst }
+  | .xchg sz a b =>
+    if a.isImm || b.isImm || !wellFormed2 a b then .error (.illegalOperands "Invalid checked XCHG operands")
+    else .ok { reads := (spanFor s nr sz a).toList ++ (spanFor s nr sz b).toList, store := (spanFor s nr sz a).orElse (fun _ => spanFor s nr sz b), rmw := a.isMem || b.isMem }
   | .bswap .. => .ok {} -- The numeric step retains its undefined-width refusal.
   | .shift _ sz dst _ | .rot _ sz dst _ =>
     if dst.isImm then .error (.illegalOperands "Invalid checked shift/rotate destination")
@@ -146,10 +150,10 @@ private def accessPlan (i : Instr) (s : Cpu) : Except MsErr AccessPlan :=
     if sz == .b then .error (.illegalOperands "Invalid checked bit-test width")
     else
       let span : AccessSpan := { address := bitStringByte s sz ea reg high nr, bytes := 1 }
-      .ok { reads := [span], store := if k == .bt then none else some span }
+      .ok { reads := [span], store := if k == .bt then none else some span, rmw := i.op.anyLocked }
   | .bit k sz dst offset =>
     if sz == .b || dst.isImm || offset.isMem then .error (.illegalOperands "Invalid checked bit-test operands/width")
-    else .ok { reads := (spanFor s nr sz dst).toList, store := if k == .bt then none else spanFor s nr sz dst }
+    else .ok { reads := (spanFor s nr sz dst).toList, store := if k == .bt then none else spanFor s nr sz dst, rmw := i.op.anyLocked }
   | .vmov .. => .ok {}
   | .vmovs sz .. =>
     if vmovsEncodable sz then .ok {} else .error (.illegalOperands "Invalid checked scalar vector width")
@@ -204,10 +208,10 @@ private def validate (kind : MemoryAccessKind) (span : AccessSpan) (s : CheckedS
           let initialized := permitted profile.initialized span
           { s with events := s.events ++ [.memory .read span.address data initialized] }
 
-private def commit (span : Option AccessSpan) (before : CheckedState) (cpu : Cpu) : CheckedState :=
+private def commit (plan : AccessPlan) (original before : CheckedState) (cpu : Cpu) : CheckedState :=
   -- MsErr still denotes model refusal, never a fabricated architectural fault.
   if cpu.stopped then { before with cpu } else
-  match span with
+  match plan.store with
   | none => { before with cpu }
   | some span =>
     match before.profile with
@@ -215,8 +219,13 @@ private def commit (span : Option AccessSpan) (before : CheckedState) (cpu : Cpu
     | some profile =>
       let initialized := fun address =>
         if (address - span.address).toNat < span.bytes then true else profile.initialized address
-      let event := MemoryAccessEvent.memory .write span.address (bytesAt cpu.mem span) true
-      { before with cpu, profile := some { profile with initialized }, events := before.events ++ [event] }
+      let event := if plan.rmw then
+        MemoryAccessEvent.rmw span.address (bytesAt original.cpu.mem span) (bytesAt cpu.mem span) (permitted profile.initialized span)
+        else .memory .write span.address (bytesAt cpu.mem span) true
+      -- A successful RMW is one observation; its preflight read is retained
+      -- separately only on fault. Every incoming public event is preserved.
+      let history := if plan.rmw then original.events else before.events
+      { before with cpu, profile := some { profile with initialized }, events := history ++ [event] }
 
 /-- The same shared pair calculation used by the numeric step decides #DE.
 Only the typed outcome is added here, after successful operand access. -/
@@ -253,7 +262,7 @@ def stepChecked (i : Instr) (s : CheckedState) : CheckedState :=
         match plan.store with | none => checked | some span => validate .write span checked
       if checked.stopped then checked else
       if divisionFault i checked.cpu then fail checked .divideError else
-        commit plan.store checked (step i checked.cpu checked.addressWidth)
+        commit plan s checked (step i checked.cpu checked.addressWidth)
 
 def runChecked (instructions : List Instr) (s : CheckedState) : CheckedState :=
   instructions.foldl (fun state instruction => stepChecked instruction state) s
