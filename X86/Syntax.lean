@@ -1624,10 +1624,11 @@ inductive Op where
   /-- P1 BATCH 12: UD2 (SDM Vol. 2A): "Generates an invalid opcode exception."
   The one form in the roster so far whose whole meaning is a fault. -/
   | ud2
-  /-- P1 BATCH 12: RET near, no immediate (`C3`).  Pops RIP.  The far return and
-  the `RET imm16` form are NOT here — x86isa implements only the far return with
-  immediate (`0xCA`), which is the complement of what this models. -/
-  | ret
+  /-- Near RET. The optional unsigned imm16 releases arguments only after a
+  successful64-bit pop. The default preserves the original C3 API; C2 and C3
+  share target/fault/frame behavior. ACL2 differential coverage of the existing
+  roster remains the zero-release profile. -/
+  | ret (release : BitVec 16 := 0)
   /-- P1 BATCH 12: LEAVE (`C9`) — exactly `mov rsp, rbp` then `pop rbp`
   (SDM Vol. 2A, LEAVE). -/
   | leave
@@ -2738,7 +2739,7 @@ def opOperands : Op → List Operand
   | .nop dst => dst.toList
   | .endbr64 => []
   | .ud2 => []
-  | .ret => []
+  | .ret _ => []
   | .leave => []
   | .shiftx _ _ _ src _ => [src]
   | .movbe _ dst src => [dst, src]
@@ -2918,7 +2919,7 @@ def Op.anyLocked : Op → Bool
   | .nop dst => (dst.map Operand.locked).getD false
   | .endbr64 => false
   | .ud2 => false
-  | .ret => false
+  | .ret _ => false
   | .leave => false
   | .shiftx _ _ _ src _ => src.locked
   | .movbe _ dst src => dst.locked || src.locked
@@ -3177,7 +3178,7 @@ def Op.mnemonic : Op → String
   | .nop _ => "nop"
   | .endbr64 => "endbr64"
   | .ud2 => "ud2"
-  | .ret => "retq"
+  | .ret _ => "retq"
   | .leave => "leaveq"
   -- P1 BATCH 13.  The `x` suffix is the mnemonic, not a width: `shlx` is one
   -- instruction at two operand sizes, spelled `shlxl`/`shlxq` by AT&T exactly as

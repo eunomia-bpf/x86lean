@@ -307,6 +307,11 @@ def translate(addr, n, text):
 
     if mn in ("ret", "retq") and len(words) == 1:
         return done(lambda: ".ret")
+    if mn in ("ret", "retq") and len(words) == 2 and words[1].startswith("$"):
+        release = _num(words[1][1:])
+        if not -(1 << 15) <= release < (1 << 16):
+            raise Refused(f"{what}: near RET release is outside imm16")
+        return done(lambda: f"(.ret {bv(release,16)})")
 
     # branches: a bare hex target, or `*operand` for indirect
     if mn in ("jmp", "jmpq", "call", "callq") or (mn.startswith("j") and mn[1:] in CC):

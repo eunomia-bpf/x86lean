@@ -2432,11 +2432,11 @@ def step (i : Instr) (s : Cpu) (addressWidth : LinearAddressWidth := .la48)
   -- `retq` that had already incremented RSP would disagree on `rsp` as well as
   -- on `rip`, and the disagreement on `rsp` is the one that says the ORDER is
   -- observable rather than an implementation detail.
-  | .ret =>
+  | .ret release =>
       let sp := s.regs.get .rsp
       let tgt := s.readMem .q sp
       if canonical tgt addressWidth then
-        { s.setReg .q .rsp (sp + 8) with rip := tgt }
+        { s.setReg .q .rsp (sp + 8 + release.setWidth 64) with rip := tgt }
       else s.halt (.unimplemented "non-canonical return address (#GP(0) in hardware)")
 
   -- LEAVE (SDM Vol. 2A): "Set RSP to RBP, then POP RBP."  Written as those two

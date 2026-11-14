@@ -136,7 +136,8 @@ private def accessPlan (i : Instr) (s : Cpu) (context : StringContext) : Except 
         | .call _ => some { address := s.regs.get .rsp - 8, bytes := 8 }
         | _ => none
       .ok { reads, store, target := some (target.resolve s nr) }
-  | .ret => .ok { reads := [{ address := s.regs.get .rsp, bytes := 8 }], target := some (s.readMem .q (s.regs.get .rsp)) }
+  | .ret _ => .ok { reads := [{ address := s.regs.get .rsp, bytes := 8 }], target := some (s.readMem .q (s.regs.get .rsp)) }
+  | .leave => .ok { reads := [{ address := s.regs.get .rbp, bytes := 8 }] }
   | .jcc condition displacement => .ok { target := if condition.eval s.flags then some (nr + displacement) else none }
   | .jcxz addr32 displacement => .ok { target := if s.jcxzTaken addr32 then some (nr + displacement) else none }
   | .loop kind addr32 displacement =>

@@ -1373,7 +1373,7 @@ def isMemDestVector (v : Vec) : Bool :=
     | .nop _ => false
     | .endbr64 => false
     | .ud2 => false
-    | .ret => false
+    | .ret _ => false
     | .leave => false
     -- ⭐ P1 BATCH 13.  `.movbe` IS THE FIRST NEW MEMORY-DESTINATION FORM SINCE
     -- THE CATCH-ALL WAS DELETED, and the deletion did its job: adding the

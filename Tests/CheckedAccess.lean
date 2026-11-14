@@ -638,7 +638,9 @@ private def stackCases : List StackCase := [
   { op := .call (.indirect (.reg .rsp)), writeAddress := some 0x1ff8, writeValue := 0x4003, rsp := 0x1ff8, rip := 0x2000 },
   { op := .call (.indirect (.mem { base := some .rsp })), readAddress := some 0x2000, writeAddress := some 0x1ff8, writeValue := 0x4003, rsp := 0x1ff8, rip := 0x6000 },
   { op := .call (.indirect (.mem { base := some .rsp, disp := -8 })), readAddress := some 0x1ff8, readValue := 0x7000, writeAddress := some 0x1ff8, writeValue := 0x4003, rsp := 0x1ff8, rip := 0x7000 },
-  { op := .ret, readAddress := some 0x2000, rsp := 0x2008, rip := 0x6000 }
+  { op := .ret, readAddress := some 0x2000, rsp := 0x2008, rip := 0x6000 },
+  { op := .ret 8, readAddress := some 0x2000, rsp := 0x2010, rip := 0x6000 },
+  { op := .ret 65535, readAddress := some 0x2000, rsp := 0x12007, rip := 0x6000 }
 ]
 example : (stackCases.take 10).all (fun c => (List.range 9).all (checkStack c)) = true := by decide
 example : (stackCases.drop 10).all (fun c => (List.range 9).all (checkStack c)) = true := by decide
@@ -1336,5 +1338,27 @@ example : checkStringContext .b = true := by decide
 example : checkStringContext .w = true := by decide
 example : checkStringContext .d = true := by decide
 example : checkStringContext .q = true := by decide
+
+-- LEAVE reads the incoming RBP, with complete rollback of its prepared
+-- RSP/RBP changes on access faults. The old RSP is not the frame address.
+example : spans.all (fun (base,lo,hi) =>
+    [(LinearAddressWidth.la48,lo),(.la57,hi)].all (fun (width,valid) =>
+      (List.range 3).all (fun mode =>
+        let seed := entry base initial
+        let cpu := { seed with regs := (seed.regs.set .rbp base).set .rsp 0x3000 }
+        let p : MemoryProfile := { readable := fun _ => mode != 1, initialized := fun _ => false }
+        let t := stepChecked { op := .leave, len := 1 }
+          { cpu, addressWidth := width, profile := if mode == 2 then none else some p, events := [prior] }
+        let fault := if mode == 2 then none else if !valid then some (ExecutionFault.nonCanonical base)
+          else if mode == 1 then some (.read base 8) else none
+        let success := mode != 2 && fault.isNone
+        let expected := if success then
+          { cpu with regs := (cpu.regs.set .rsp (base+8)).set .rbp initial, rip := 0x4001 }
+          else cpu
+        let events := [prior] ++ (match fault with
+          | some f => [MemoryAccessEvent.fault f]
+          | none => if success then [.memory .read base (bytes 8 initial) false] else [])
+        t.fault == fault && t.cpu.ms.isSome == (mode == 2) && t.events == events &&
+        sameCpu { t.cpu with ms := none } expected))) = true := by decide
 
 end X86.Tests.CheckedAccess

@@ -1376,7 +1376,7 @@ COMBINATION, a constant WINDOW CONTENT — and the first time the batch that wou
 have been fooled looked for it in advance. -/
 def wrongRetNoPop (i : Instr) (s : Cpu) : Cpu :=
   match i.op with
-  | .ret =>
+  | .ret _ =>
       let tgt := s.readMem .q (s.regs.get .rsp)
       if canonical tgt then { s with rip := tgt }   -- the BUG: RSP never moves
       else s.halt (.unimplemented "non-canonical return address (#GP(0) in hardware)")
