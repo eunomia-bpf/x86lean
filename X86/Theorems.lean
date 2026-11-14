@@ -1601,7 +1601,8 @@ and `wrongRepAdvanceOnCountZero` is that model. -/
 theorem step_rep_rip_unmoved (h : Live s) (hp : repApplies .rep k = true)
     (h0 : ¬ (s.regs.get .rcx = 0)) :
     (step ⟨.repstrop .rep k sz, len⟩ s).rip = s.rip := by
-  simp only [step, Cpu.stopped, h, hp, if_false, Bool.not_true, if_neg h0,
+  simp only [step, StringContext.prepare, StringContext.count, StringContext.offset,
+    Cpu.stopped, h, hp, if_false, Bool.not_true, if_neg h0,
     beq_iff_eq, Bool.false_eq_true, RepPrefix.terminates, Cpu.setRip, Cpu.setReg]
   simp
 
@@ -1633,7 +1634,8 @@ theorem step_repstrop_iterates_like_strop (h : Live s) (hp : repApplies r k = tr
     (step ⟨.repstrop r k sz, len⟩ s).mem = (step ⟨.strop k sz, len⟩ s).mem
   ∧ (step ⟨.repstrop r k sz, len⟩ s).flags = (step ⟨.strop k sz, len⟩ s).flags := by
   constructor <;>
-    (simp only [step, Cpu.stopped, h, hp, if_false, Bool.not_true, if_neg h0,
+    (simp only [step, StringContext.prepare, StringContext.count, StringContext.offset,
+    Cpu.stopped, h, hp, if_false, Bool.not_true, if_neg h0,
       beq_iff_eq, Bool.false_eq_true, Cpu.setRip, Cpu.setReg]; simp)
 
 end RepStringOps

@@ -273,6 +273,44 @@ def bitScanStep (rev : Bool) (sz : Size) (dst : GPR) (a : Val)
     let idx := if rev then Value.bitScanReverse sz a else Value.bitScanForward sz a
     (s.setReg sz dst (BitVec.ofNat 64 idx)).setRip nr
 
+/-- Resolved legacy string prefixes. The source base is added after address-
+size truncation; the destination remains the flat ES address. Defaults are
+exactly the pre-existing64-bit flat profile. -/
+structure StringContext where
+  address32 : Bool := false
+  sourceBase : Val := 0
+  deriving DecidableEq, Repr, Inhabited, BEq
+
+@[simp] def StringContext.offset (context : StringContext) (value : Val) : Val :=
+  if context.address32 then (value.setWidth 32).setWidth 64 else value
+
+@[simp] def StringContext.source (context : StringContext) (s : Cpu) : Val :=
+  let offset := context.offset (s.regs.get .rsi)
+  if context.sourceBase == 0 then offset else context.sourceBase + offset
+
+@[simp] def StringContext.destination (context : StringContext) (s : Cpu) : Val :=
+  context.offset (s.regs.get .rdi)
+
+@[simp] def StringContext.count (context : StringContext) (s : Cpu) : Val :=
+  context.offset (s.regs.get .rcx)
+
+/-- Address32 REP also zero-extends the participating implicit registers at
+entry, including count zero and the first fault. STOS/SCAS do not touch RSI;
+LODS does not touch RDI. A stopped checked state bypasses this preparation. -/
+@[simp] def StringContext.prepare (context : StringContext) (op : Op) (s : Cpu) : Cpu :=
+  if context.address32 then
+    match op with
+    | .repstrop _ kind _ =>
+      let s := s.setReg .d .rcx (s.getReg .d .rcx)
+      let s := match kind with
+        | .movs | .lods | .cmps => s.setReg .d .rsi (s.getReg .d .rsi)
+        | _ => s
+      match kind with
+      | .movs | .stos | .cmps | .scas => s.setReg .d .rdi (s.getReg .d .rdi)
+      | _ => s
+    | _ => s
+  else s
+
 /-- ⭐ P1 BATCH 16: ONE ITERATION OF A STRING OPERATION, WITHOUT THE RIP WRITE.
 
 This is P1 batch 15's `.strop` body verbatim, with the single `setRip nr` at the
@@ -290,40 +328,42 @@ visible at the call site rather than an absence to be inferred.  Batch 16 is the
 first form in this model whose RIP is sometimes its OWN address, and an
 implicit-fallthrough spelling of that would be indistinguishable from a
 forgotten write. -/
-def stringIter (k : StringOp) (sz : Size) (s : Cpu) : Cpu :=
+def stringIter (k : StringOp) (sz : Size) (s : Cpu) (context : StringContext := {}) : Cpu :=
   let step : BitVec 64 := BitVec.ofNat 64 sz.bytes
   let d : BitVec 64 := if s.flags.df then 0 - step else step
-  let si := s.regs.get .rsi
-  let di := s.regs.get .rdi
+  let si := context.offset (s.regs.get .rsi)
+  let di := context.destination s
+  let source := context.source s
+  let pointerSize := if context.address32 then Size.d else .q
   match k with
   | .movs =>
-      let v := s.readMem sz si
+      let v := s.readMem sz source
       let s := s.writeMem sz di v
-      ((s.setReg .q .rsi (si + d)).setReg .q .rdi (di + d))
+      ((s.setReg pointerSize .rsi (si + d)).setReg pointerSize .rdi (di + d))
   | .stos =>
       let v := s.getReg sz .rax
       let s := s.writeMem sz di v
-      s.setReg .q .rdi (di + d)
+      s.setReg pointerSize .rdi (di + d)
   -- ⚠️ LODS WRITES THE ACCUMULATOR THROUGH THE ORDINARY WIDTH RULE, so
   -- `lodsl` ZERO-EXTENDS into RAX while `lodsw` and `lodsb` MERGE (SDM
   -- Vol. 1 §3.4.1.1).  This is the one place in the group where `setReg`'s
   -- width behaviour is wanted rather than bypassed.
   | .lods =>
-      let v := s.readMem sz si
+      let v := s.readMem sz source
       let s := s.setReg sz .rax v
-      s.setReg .q .rsi (si + d)
+      s.setReg pointerSize .rsi (si + d)
   -- ⛔ SOURCE MINUS DESTINATION: `[RSI] − [RDI]`, not the AT&T print order.
   | .cmps =>
-      let a := s.readMem sz si
+      let a := s.readMem sz source
       let b := s.readMem sz di
       let s := s.setFlags (Flags.sub sz a b s.flags)
-      ((s.setReg .q .rsi (si + d)).setReg .q .rdi (di + d))
+      ((s.setReg pointerSize .rsi (si + d)).setReg pointerSize .rdi (di + d))
   -- SCAS is `RAX − [RDI]`, and only RDI moves.
   | .scas =>
       let a := s.getReg sz .rax
       let b := s.readMem sz di
       let s := s.setFlags (Flags.sub sz a b s.flags)
-      s.setReg .q .rdi (di + d)
+      s.setReg pointerSize .rdi (di + d)
 
 
 /-! ### The double-width accumulator pair (P1 BATCH 17)
@@ -1402,7 +1442,8 @@ No arithmetic or flag rule is duplicated by that access layer. -/
     (s.writeOperand sz nr dst res).setRip nr
 
 /-- The small-step transition.  A stopped model does not move. -/
-def step (i : Instr) (s : Cpu) (addressWidth : LinearAddressWidth := .la48) : Cpu :=
+def step (i : Instr) (s : Cpu) (addressWidth : LinearAddressWidth := .la48)
+    (context : StringContext := {}) : Cpu :=
   if s.stopped then s else
   -- ⭐⭐ P2 ITEM 2: THE LOCK WELL-FORMEDNESS RULE, CHECKED ONCE AND BEFORE THE
   -- MATCH.  A `lock` on a form the SDM does not list is #UD on real silicon
@@ -2544,7 +2585,7 @@ def step (i : Instr) (s : Cpu) (addressWidth : LinearAddressWidth := .la48) : Cp
   -- "Flags Affected: None" for MOVS, STOS and LODS.  CMPS and SCAS set all six
   -- arithmetic flags and leave NONE undefined — the whole group draws nothing
   -- from the oracle, which is why every row of it is `T-exact`.
-  | .strop k sz => (stringIter k sz s).setRip nr
+  | .strop k sz => (stringIter k sz s context).setRip nr
 
   -- ⭐⭐ P1 BATCH 16: THE REPEAT PREFIXES (SDM Vol. 2B, REP/REPE/REPZ/REPNE/
   -- REPNZ).  ONE ITERATION PER `step`, and the loop-back is a RIP that does not
@@ -2582,13 +2623,14 @@ def step (i : Instr) (s : Cpu) (addressWidth : LinearAddressWidth := .la48) : Cp
       if !repApplies r k then
         s.halt (.unimplemented "repeat prefix not filed for this string op")
       else
-        let cx := s.regs.get .rcx
+        let s := context.prepare i.op s
+        let cx := context.count s
         -- RCX = 0 ON ENTRY: no iteration at all.  No memory access, no flag
         -- write, no pointer move, and RCX is NOT decremented — it does not wrap
         -- to all-ones.  This is the only path that always advances.
         if cx == 0 then s.setRip nr
         else
-          let s' := (stringIter k sz s).setReg .q .rcx (cx - 1)
+          let s' := (stringIter k sz s context).setReg (if context.address32 then .d else .q) .rcx (cx - 1)
           s'.setRip (if r.terminates s'.flags.zf then nr else s.rip)
 
   | .call t =>

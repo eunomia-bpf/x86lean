@@ -1279,4 +1279,62 @@ example : [false,true].all (fun indirect =>
       t.cpu.ms.isNone && t.fault == some fault &&
       t.events == [prior] ++ priorRead ++ [.fault fault] && sameCpu t.cpu cpu)) = true := by decide
 
+/-- Independent string-prefix, address, fault and frame goldens. The expected
+addresses/registers below do not use StringContext's calculation helpers. -/
+private def checkStringContext (size : Size) : Bool :=
+  ([StringOp.movs,.stos] : List StringOp).all (fun kind =>
+    [false,true].all (fun a32 => [false,true].all (fun df =>
+      ([0,0x5000] : List Val).all (fun base => (List.range 2).all (fun count =>
+        (List.range 4).all (fun mode =>
+          let src : Val := 0x1000 + base
+          let seed := entry src initial
+          let si : Val := if a32 then 0x70000001000 else 0x1000
+          let di : Val := if a32 then 0x80000003000 else 0x3000
+          let cx := BitVec.ofNat 64 count + (if a32 then 0x90000000000 else 0)
+          let cpu := { seed with
+            regs := ((seed.regs.set .rsi si).set .rdi di).set .rcx cx
+            flags := { seed.flags with df } }
+          let context : StringContext := { address32 := a32, sourceBase := base }
+          let p : MemoryProfile := {
+            readable := fun _ => mode != 1
+            writable := fun _ => mode != 2
+            initialized := fun _ => false }
+          let i : Instr := { op := .repstrop .rep kind size, len := 3 }
+          let t := stepChecked i { cpu, profile := if mode == 3 then none else some p, events := [prior] } context
+          let normalizedRegs := ((cpu.regs.set .rcx (BitVec.ofNat 64 count)).set .rdi 0x3000).set .rsi
+            (if a32 && kind == .movs then 0x1000 else si)
+          let normalized := { cpu with regs := normalizedRegs }
+          let refused := count != 0 && mode == 3
+          let readDenied := count != 0 && kind == .movs && mode == 1
+          let writeDenied := count != 0 && !readDenied && mode == 2
+          let fault := if readDenied then some (ExecutionFault.read src size.bytes)
+            else if writeDenied then some (.write 0x3000 size.bytes) else none
+          let success := !refused && fault.isNone
+          let value := if kind == .movs then initial else input
+          let readEvents := if count != 0 && kind == .movs && !refused && !readDenied then
+            [MemoryAccessEvent.memory .read src (bytes size.bytes initial) false] else []
+          let events := [prior] ++ readEvents ++ (match fault with
+            | some f => [.fault f]
+            | none => if success && count != 0 then [.memory .write 0x3000 (bytes size.bytes value) true] else [])
+          let expected := if success then
+            if count == 0 then normalized.setRip 0x4003 else
+              let d := if df then -(BitVec.ofNat 64 size.bytes) else BitVec.ofNat 64 size.bytes
+              let next := (normalized.writeMem size 0x3000 value).setReg .q .rcx 0
+              let next := next.setReg .q .rdi (0x3000+d)
+              if kind == .movs then next.setReg .q .rsi (0x1000+d) else next
+            else normalized
+          t.fault == fault && t.events == events &&
+          t.cpu.ms.isSome == refused && sameCpu { t.cpu with ms := none } expected &&
+          (if success && count != 0 then
+            match t.profile with
+            | none => false
+            | some p => (List.range size.bytes).all (fun n => p.initialized (0x3000+BitVec.ofNat 64 n)) &&
+                !p.initialized 0x2fff && !p.initialized 0x3008
+           else true)))))))
+
+example : checkStringContext .b = true := by decide
+example : checkStringContext .w = true := by decide
+example : checkStringContext .d = true := by decide
+example : checkStringContext .q = true := by decide
+
 end X86.Tests.CheckedAccess

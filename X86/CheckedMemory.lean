@@ -77,7 +77,7 @@ private def sourcePlan (valid : Bool) (s : Cpu) (nr : Val) (size : Size)
 /-- Operand effects only: no duplicate numeric or flag interpretation.
 CMOV memory sources are read even when the value is not selected (Intel SDM
 CMOVcc operation: the source read precedes condition evaluation). -/
-private def accessPlan (i : Instr) (s : Cpu) : Except MsErr AccessPlan :=
+private def accessPlan (i : Instr) (s : Cpu) (context : StringContext) : Except MsErr AccessPlan :=
   let nr := s.rip + BitVec.ofNat 64 i.len
   match i.op with
   | .nop _ | .lea .. | .cext _ => .ok {}
@@ -165,10 +165,15 @@ private def accessPlan (i : Instr) (s : Cpu) : Except MsErr AccessPlan :=
     if !vmovsEncodable sz then .error (.illegalOperands "Invalid checked scalar vector width")
     else .ok { store := some { address := ea.addr s nr, bytes := sz.bytes } }
   | .strop .movs sz =>
-    .ok { reads := [{ address := s.regs.get .rsi, bytes := sz.bytes }], store := some { address := s.regs.get .rdi, bytes := sz.bytes } }
+    .ok { reads := [{ address := context.source s, bytes := sz.bytes }], store := some { address := context.destination s, bytes := sz.bytes } }
+  | .strop .stos sz =>
+    .ok { store := some { address := context.destination s, bytes := sz.bytes } }
   | .repstrop .rep .movs sz =>
-    if s.regs.get .rcx == 0 then .ok {} else
-    .ok { reads := [{ address := s.regs.get .rsi, bytes := sz.bytes }], store := some { address := s.regs.get .rdi, bytes := sz.bytes } }
+    if context.count s == 0 then .ok {} else
+    .ok { reads := [{ address := context.source s, bytes := sz.bytes }], store := some { address := context.destination s, bytes := sz.bytes } }
+  | .repstrop .rep .stos sz =>
+    if context.count s == 0 then .ok {} else
+    .ok { store := some { address := context.destination s, bytes := sz.bytes } }
   | _ => .error (.unimplemented "Checked access is not yet supported for this instruction class")
 
 /-- Potential input bytes for a platform memory view, using the very same
@@ -176,12 +181,12 @@ access plan as checked execution. This does not grant access: stepChecked must
 still check canonicality, alignment and permissions, and recompute targets from
 the supplied bytes. An adapter can materialize arbitrary functional memory into
 the finite Mem representation without duplicating instruction footprints. -/
-def plannedReadAddresses (i : Instr) (s : Cpu) : Except MsErr (List Val) :=
+def plannedReadAddresses (i : Instr) (s : Cpu) (context : StringContext := {}) : Except MsErr (List Val) :=
   if s.stopped || i.op.lockIllegal then .ok [] else
   match i.op with
   | .ud2 => .ok []
   | _ => do
-    let plan ← accessPlan i s
+    let plan ← accessPlan i (context.prepare i.op s) context
     pure (plan.reads.flatMap (fun span =>
       (List.range span.bytes).map (fun offset => span.address + BitVec.ofNat 64 offset)))
 
@@ -251,27 +256,28 @@ private def divisionFault (i : Instr) (s : Cpu) : Bool :=
 /-- Keep the original harness refusal in step, while exposing the same
 oracle-driven result branch to checked memory. Access and encoding validation
 precede this call. The numeric rule itself lives beside the default step. -/
-private def checkedResult (i : Instr) (s : Cpu) (width : LinearAddressWidth) : Cpu :=
+private def checkedResult (i : Instr) (s : Cpu) (width : LinearAddressWidth) (context : StringContext) : Cpu :=
   match i.op with
   | .dshift k sz dst src amt =>
     let count := match amt with | .imm8 value => value | .cl => (s.getReg .b .rcx).setWidth 8
     let n := Flags.shiftCount sz count
     if dshiftMemUndefined sz dst.isMem n then
       dshiftResult k sz dst src n (s.rip + BitVec.ofNat 64 i.len) s
-    else step i s width
-  | _ => step i s width
+    else step i s width context
+  | _ => step i s width context
 
 /-- Execute a supported instruction with checked effects. Every successful
 numeric result comes from the original step or its shared result helper. A denied final store retains the
 read prefix, while registers/flags/memory/oracle/PC do not commit. A missing or
 unported capability is MsErr, distinct from a checked access fault. -/
-def stepChecked (i : Instr) (s : CheckedState) : CheckedState :=
+def stepChecked (i : Instr) (s : CheckedState) (context : StringContext := {}) : CheckedState :=
   if s.stopped then s else
   if i.op.lockIllegal then fail s .invalidOpcode else
   match i.op with
   | .ud2 => fail s .invalidOpcode
   | _ =>
-    match accessPlan i s.cpu with
+    let s := { s with cpu := context.prepare i.op s.cpu }
+    match accessPlan i s.cpu context with
     | .error reason => refuse s reason
     | .ok plan =>
       let checked := plan.reads.foldl (fun state span =>
@@ -287,15 +293,16 @@ def stepChecked (i : Instr) (s : CheckedState) : CheckedState :=
         | none => checked
       if checked.stopped then checked else
       if divisionFault i checked.cpu then fail checked .divideError else
-        commit plan s checked (checkedResult i checked.cpu checked.addressWidth)
+        commit plan s checked (checkedResult i checked.cpu checked.addressWidth context)
 
-def runChecked (instructions : List Instr) (s : CheckedState) : CheckedState :=
-  instructions.foldl (fun state instruction => stepChecked instruction state) s
+def runChecked (instructions : List Instr) (s : CheckedState) (context : StringContext := {}) : CheckedState :=
+  instructions.foldl (fun state instruction => stepChecked instruction state context) s
 
 /-- A checked fault or model refusal is stable, including the entire profile
 and event prefix, not just the register projections. -/
-theorem stepChecked_stopped (i : Instr) (s : CheckedState) (h : s.stopped = true) :
-    stepChecked i s = s := by
+theorem stepChecked_stopped (i : Instr) (s : CheckedState) (h : s.stopped = true)
+    (context : StringContext := {}) :
+    stepChecked i s context = s := by
   simp [stepChecked, h]
 
 end X86
