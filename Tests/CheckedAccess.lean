@@ -677,13 +677,13 @@ private def checkControl (kind : Nat) : Bool := targets.all (fun (target,lo,hi) 
       let t := stepChecked i { cpu, addressWidth := width, profile := if mode == 3 then none else some p, events := [prior] }
       let readMissing := read && mode == 3
       let readDenied := read && mode == 1
-      let badTarget := !readMissing && !readDenied && (kind < 7 || taken) && !valid
-      let storeMissing := !readMissing && !readDenied && !badTarget && store && mode == 3
-      let storeDenied := !readMissing && !readDenied && !badTarget && store && mode == 2
+      let storeMissing := !readMissing && !readDenied && store && mode == 3
+      let storeDenied := !readMissing && !readDenied && store && mode == 2
+      let badTarget := !readMissing && !readDenied && !storeMissing && !storeDenied && (kind < 7 || taken) && !valid
       let modelRefusal := readMissing || storeMissing
       let fault := if readDenied then some (ExecutionFault.read ra 8)
-        else if badTarget then some (.nonCanonical target)
-        else if storeDenied then some (.write 0x1ff8 8) else none
+        else if storeDenied then some (.write 0x1ff8 8)
+        else if badTarget then some (.nonCanonical target) else none
       let success := !modelRefusal && fault.isNone
       let events := [prior] ++ (if read && !readMissing && !readDenied then
           [.memory .read ra (bytes 8 target) false] else []) ++
@@ -1246,5 +1246,37 @@ example : (List.range 3).all (fun scene =>
     t.cpu.mem.readSize .q address == (if scene == 0 then initial else input) &&
     t.cpu.rip == (if scene == 0 then 0x4007 else 0x4003)) = true := by decide
 
+
+-- Checked sign extension is register-only: it needs neither a memory
+-- profile nor a fabricated access, and preserves the entire unrelated CPU.
+example : ([CextKind.cwd,.cdq,.cqo] : List CextKind).all (fun kind =>
+    ([0,1,0x7fff,0x8000,0x7fffffff,0x80000000,0x8000000000000000,0xffffffffffffffff] : List Val).all (fun value =>
+      let cpu := entry address initial
+      let cpu := { cpu with regs := cpu.regs.set .rax value }
+      let i : Instr := { op := .cext kind, len := 2 }
+      let t := stepChecked i { cpu, events := [prior] }
+      t.fault.isNone && t.cpu.ms.isNone && t.events == [prior] &&
+      sameCpu t.cpu (step i cpu))) = true := by decide
+
+-- The return-slot write check wins over a bad branch target, after a
+-- successful indirect source read. Neither failure commits memory or registers.
+example : [false,true].all (fun indirect =>
+    (List.range 3).all (fun mode =>
+      let cpu := entry address 0x800000000000
+      let cpu := { cpu with regs := cpu.regs.set .rsp 0x3008 }
+      let i : Instr := { op := .call (if indirect then .indirect memory
+        else .rel (0x800000000000-0x4003)), len := 3 }
+      let p : MemoryProfile := {
+        readable := fun _ => mode != 2
+        writable := fun _ => mode == 0
+        initialized := fun _ => false }
+      let t := stepChecked i { cpu, profile := some p, events := [prior] }
+      let deniedRead := indirect && mode == 2
+      let fault := if deniedRead then ExecutionFault.read address 8
+        else if mode != 0 then .write 0x3000 8 else .nonCanonical 0x800000000000
+      let priorRead := if indirect && !deniedRead then
+        [MemoryAccessEvent.memory .read address [0,0,0,0,0,0x80,0,0] false] else []
+      t.cpu.ms.isNone && t.fault == some fault &&
+      t.events == [prior] ++ priorRead ++ [.fault fault] && sameCpu t.cpu cpu)) = true := by decide
 
 end X86.Tests.CheckedAccess

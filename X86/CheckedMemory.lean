@@ -80,7 +80,7 @@ CMOVcc operation: the source read precedes condition evaluation). -/
 private def accessPlan (i : Instr) (s : Cpu) : Except MsErr AccessPlan :=
   let nr := s.rip + BitVec.ofNat 64 i.len
   match i.op with
-  | .nop _ | .lea .. => .ok {}
+  | .nop _ | .lea .. | .cext _ => .ok {}
   | .mov sz dst src =>
     if !wellFormed2 dst src || dst.isImm then .error (.illegalOperands "Invalid checked MOV operands")
     else .ok { reads := (spanFor s nr sz src).toList, store := spanFor s nr sz dst }
@@ -276,12 +276,15 @@ def stepChecked (i : Instr) (s : CheckedState) : CheckedState :=
     | .ok plan =>
       let checked := plan.reads.foldl (fun state span =>
         if state.stopped then state else validate .read span state) s
+      -- CALL's stack-write access precedes target canonicality. In
+      -- particular a denied return-slot write wins over a noncanonical target;
+      -- it remains preflight only, with no committed bytes on either fault.
+      let checked := if checked.stopped then checked else
+        match plan.store with | none => checked | some span => validate .write span checked
       let checked := if checked.stopped then checked else
         match plan.target with
         | some target => if canonical target checked.addressWidth then checked else fail checked (.nonCanonical target)
         | none => checked
-      let checked := if checked.stopped then checked else
-        match plan.store with | none => checked | some span => validate .write span checked
       if checked.stopped then checked else
       if divisionFault i checked.cpu then fail checked .divideError else
         commit plan s checked (checkedResult i checked.cpu checked.addressWidth)
