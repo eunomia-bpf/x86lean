@@ -703,4 +703,254 @@ example : [false,true].all (fun denyReturn =>
     t.events == [prior,.memory .write 0x1ff8 (bytes 8 0x4003) true] ++
       (if denyReturn then [.fault (.read 0x1ff8 8)] else [.memory .read 0x1ff8 (bytes 8 0x4003) true])) = true := by decide
 
+
+-- Register bit indices use the fork's actual selected-byte access, including
+-- signed offsets. Literal address/result rows keep this separate from planning.
+private def bitRows : List (Val × Int × Bool × Val × Val × Val) := [
+  (0,0,true,0x81,0x80,0x80), (1,0,false,0x83,0x81,0x83),
+  (7,0,true,0x81,1,1), (8,1,true,0x81,0x80,0x80),
+  (-1,-1,true,0x81,1,1), (-8,-1,true,0x81,0x80,0x80), (-9,-2,true,0x81,1,1)
+]
+private def checkBit (sz : Size) : Bool := bitRows.all (fun (index,delta,cf,set,clear,flip) =>
+  [BitKind.bt,.bts,.btr,.btc].all (fun k => (List.range 8).all (fun mode =>
+    let base := address + BitVec.ofInt 64 delta
+    let cpu := entry base 0x81
+    let cpu := { cpu with regs := cpu.regs.set .rcx index }
+    let i : Instr := { op := .bit k sz memory (.reg .rcx), len := 3 }
+    let p := profile { op := i.op, base, readBytes := 1, writeBytes := if k == .bt then 0 else 1 } mode
+    let t := stepChecked i { cpu, profile := some p, events := [prior] }
+    let readDenied := mode == 1 || mode == 2 || mode == 5
+    let writeDenied := k != .bt && (mode == 3 || mode == 4 || mode == 5)
+    let fault := if readDenied then some (ExecutionFault.read base 1)
+      else if writeDenied then some (.write base 1) else none
+    let value : Val := match k with | .bt => 0x81 | .bts => set | .btr => clear | .btc => flip
+    let events := [prior] ++ (if readDenied then [] else [.memory .read base [0x81] (mode != 6)]) ++
+      (match fault with | some f => [.fault f] | none => if k == .bt then [] else [.memory .write base [value.setWidth 8] true])
+    t.fault == fault && t.events == events && t.cpu.ms.isNone &&
+    sameCpu t.cpu (if fault.isNone then step i cpu else cpu) &&
+    (if fault.isNone then t.cpu.flags.cf == cf && t.cpu.flags.zf && t.cpu.oracle.cursor == 7 &&
+      t.cpu.mem.read base == value.setWidth 8 else true) &&
+    (match t.profile with | none => false | some after => after.initialized base == (if fault.isNone && k != .bt then true else p.initialized base)))))
+example : checkBit .w = true := by decide
+example : checkBit .d = true := by decide
+example : checkBit .q = true := by decide
+
+private def bitImmediateCases : List Case := [
+  { op := .bit .bt .w memory (.imm 0), readBytes := 2, writeBytes := 0, stored := 0x8877665544332211 },
+  { op := .bit .bts .w memory (.imm 0), readBytes := 2, writeBytes := 2, stored := 0x8877665544332211 },
+  { op := .bit .btr .w memory (.imm 0), readBytes := 2, writeBytes := 2, stored := 0x8877665544332210 },
+  { op := .bit .btc .w memory (.imm 0), readBytes := 2, writeBytes := 2, stored := 0x8877665544332210 },
+  { op := .bit .bt .w memory (.imm 1), readBytes := 2, writeBytes := 0, stored := 0x8877665544332211 },
+  { op := .bit .bts .w memory (.imm 1), readBytes := 2, writeBytes := 2, stored := 0x8877665544332213 },
+  { op := .bit .btr .w memory (.imm 1), readBytes := 2, writeBytes := 2, stored := 0x8877665544332211 },
+  { op := .bit .btc .w memory (.imm 1), readBytes := 2, writeBytes := 2, stored := 0x8877665544332213 },
+  { op := .bit .bt .w memory (.imm 15), readBytes := 2, writeBytes := 0, stored := 0x8877665544332211 },
+  { op := .bit .bts .w memory (.imm 15), readBytes := 2, writeBytes := 2, stored := 0x887766554433a211 },
+  { op := .bit .btr .w memory (.imm 15), readBytes := 2, writeBytes := 2, stored := 0x8877665544332211 },
+  { op := .bit .btc .w memory (.imm 15), readBytes := 2, writeBytes := 2, stored := 0x887766554433a211 },
+  { op := .bit .bt .d memory (.imm 0), readBytes := 4, writeBytes := 0, stored := 0x8877665544332211 },
+  { op := .bit .bts .d memory (.imm 0), readBytes := 4, writeBytes := 4, stored := 0x8877665544332211 },
+  { op := .bit .btr .d memory (.imm 0), readBytes := 4, writeBytes := 4, stored := 0x8877665544332210 },
+  { op := .bit .btc .d memory (.imm 0), readBytes := 4, writeBytes := 4, stored := 0x8877665544332210 },
+  { op := .bit .bt .d memory (.imm 1), readBytes := 4, writeBytes := 0, stored := 0x8877665544332211 },
+  { op := .bit .bts .d memory (.imm 1), readBytes := 4, writeBytes := 4, stored := 0x8877665544332213 },
+  { op := .bit .btr .d memory (.imm 1), readBytes := 4, writeBytes := 4, stored := 0x8877665544332211 },
+  { op := .bit .btc .d memory (.imm 1), readBytes := 4, writeBytes := 4, stored := 0x8877665544332213 },
+  { op := .bit .bt .d memory (.imm 31), readBytes := 4, writeBytes := 0, stored := 0x8877665544332211 },
+  { op := .bit .bts .d memory (.imm 31), readBytes := 4, writeBytes := 4, stored := 0x88776655c4332211 },
+  { op := .bit .btr .d memory (.imm 31), readBytes := 4, writeBytes := 4, stored := 0x8877665544332211 },
+  { op := .bit .btc .d memory (.imm 31), readBytes := 4, writeBytes := 4, stored := 0x88776655c4332211 },
+  { op := .bit .bt .q memory (.imm 0), readBytes := 8, writeBytes := 0, stored := 0x8877665544332211 },
+  { op := .bit .bts .q memory (.imm 0), readBytes := 8, writeBytes := 8, stored := 0x8877665544332211 },
+  { op := .bit .btr .q memory (.imm 0), readBytes := 8, writeBytes := 8, stored := 0x8877665544332210 },
+  { op := .bit .btc .q memory (.imm 0), readBytes := 8, writeBytes := 8, stored := 0x8877665544332210 },
+  { op := .bit .bt .q memory (.imm 1), readBytes := 8, writeBytes := 0, stored := 0x8877665544332211 },
+  { op := .bit .bts .q memory (.imm 1), readBytes := 8, writeBytes := 8, stored := 0x8877665544332213 },
+  { op := .bit .btr .q memory (.imm 1), readBytes := 8, writeBytes := 8, stored := 0x8877665544332211 },
+  { op := .bit .btc .q memory (.imm 1), readBytes := 8, writeBytes := 8, stored := 0x8877665544332213 },
+  { op := .bit .bt .q memory (.imm 63), readBytes := 8, writeBytes := 0, stored := 0x8877665544332211 },
+  { op := .bit .bts .q memory (.imm 63), readBytes := 8, writeBytes := 8, stored := 0x8877665544332211 },
+  { op := .bit .btr .q memory (.imm 63), readBytes := 8, writeBytes := 8, stored := 0x877665544332211 },
+  { op := .bit .btc .q memory (.imm 63), readBytes := 8, writeBytes := 8, stored := 0x877665544332211 }
+]
+example : (bitImmediateCases.take 18).all (fun c => (List.range 8).all (check c)) = true := by decide
+example : (bitImmediateCases.drop 18).all (fun c => (List.range 8).all (check c)) = true := by decide
+
+private def vector : BitVec 128 := 0x8877665544332211ffeeddccbbaa9988
+private def xmmInput : BitVec 128 := 0x112233445566778899aabbccddeeff00
+private def vbytes (n : Nat) (v : BitVec 128) : List (BitVec 8) :=
+  (List.range n).map (fun i => (v >>> (8*i)).setWidth 8)
+private def vectorEntry (a : Val) : Cpu :=
+  let cpu := (entry a 0).setYmm .x0 xmmInput 0xdecafbad
+  { cpu with
+    regs := cpu.regs.set .rbx a,
+    mem := ((((Mem.empty.writeN a 0xffeeddccbbaa9988 8).writeN (a+8) 0x8877665544332211 8).write (a-1) 0xa5).write (a+16) 0x5a) }
+
+private def checkVector (op : Op) (a : Val) (n : Nat) (store aligned : Bool)
+    (gold : BitVec 128) (mode : Nat) : Bool :=
+  let cpu := vectorEntry a
+  let p : MemoryProfile :=
+    { readable := fun b => !((mode == 1 || mode == 2 || mode == 5) && b == (if mode == 2 then a+BitVec.ofNat 64 (n-1) else a)),
+      writable := fun b => !((mode == 3 || mode == 4 || mode == 5) && b == (if mode == 4 then a+BitVec.ofNat 64 (n-1) else a)),
+      initialized := fun b => mode != 6 && (mode != 7 || b == a) }
+  let i : Instr := { op, len := 3 }
+  let t := stepChecked i { cpu, profile := some p, events := [prior] }
+  let denied := if store then mode == 3 || mode == 4 || mode == 5 else mode == 1 || mode == 2 || mode == 5
+  let fault := if aligned && a.toNat % 16 != 0 then some (ExecutionFault.misaligned a 16)
+    else if denied then some (if store then .write a n else .read a n) else none
+  let payload := if store then gold else vector
+  t.fault == fault && t.cpu.ms.isNone && sameCpu t.cpu (if fault.isNone then step i cpu else cpu) &&
+  t.events == [prior] ++ (match fault with | some f => [.fault f] | none => [.memory (if store then .write else .read) a (vbytes n payload) (store || mode != 6 && mode != 7)]) &&
+  t.cpu.getYmmHi .x0 == 0xdecafbad &&
+  (if fault.isNone && !store then t.cpu.getXmm .x0 == gold else t.cpu.getXmm .x0 == xmmInput) &&
+  (List.range 18).all (fun offset =>
+    let b := a-1+BitVec.ofNat 64 offset
+    let written := fault.isNone && store && 1 <= offset && offset <= n
+    t.cpu.mem.read b == (if written then (gold >>> (8*(offset-1))).setWidth 8 else cpu.mem.read b) &&
+    (match t.profile with | none => false | some after => after.readable b == p.readable b && after.writable b == p.writable b && after.initialized b == (if written then true else p.initialized b)))
+
+private def checkPacked (kind : VMovKind) (aligned : Bool) : Bool :=
+  [address,address+1].all (fun a => [false,true].all (fun store => (List.range 8).all (fun mode =>
+    checkVector (if store then .vstore kind { base := some .rbx } .x0 else .vload kind .x0 { base := some .rbx })
+      a 16 store aligned (if store then xmmInput else vector) mode)))
+example : checkPacked .dqa true = true := by decide
+example : checkPacked .dqu false = true := by decide
+example : checkPacked .aps true = true := by decide
+example : checkPacked .ups false = true := by decide
+example : checkPacked .apd true = true := by decide
+example : checkPacked .upd false = true := by decide
+
+private def checkHalf (kind : VQuadKind) : Bool := [address,address+1].all (fun a =>
+  [VHalf.lo,.hi].all (fun half => [false,true].all (fun store => (List.range 8).all (fun mode =>
+    checkVector (if store then .vstoreq half kind { base := some .rbx } .x0 else .vloadq half kind .x0 { base := some .rbx })
+      a 8 store false (if store then (if half = .lo then 0x99aabbccddeeff00 else 0x1122334455667788)
+        else if half = .lo then 0x1122334455667788ffeeddccbbaa9988 else 0xffeeddccbbaa998899aabbccddeeff00) mode))))
+example : checkHalf .ps = true := by decide
+example : checkHalf .pd = true := by decide
+
+private def checkVectorScalar (sz : Size) : Bool := [address,address+1].all (fun a =>
+  [false,true].all (fun g => [false,true].all (fun store => (List.range 8).all (fun mode =>
+    let ea : Ea := { base := some .rbx }
+    let op := if store then (if g then Op.vmovgst sz ea .x0 else .vmovsst sz ea .x0)
+      else if g then .vmovgld sz .x0 ea else .vmovsld sz .x0 ea
+    checkVector op a sz.bytes store false (if store then xmmInput else if sz == .d then 0xbbaa9988 else 0xffeeddccbbaa9988) mode))))
+example : checkVectorScalar .d = true := by decide
+example : checkVectorScalar .q = true := by decide
+
+example : ([(0x7ffffffffff0,true,true),(0x7ffffffffff8,false,true),
+    (0x00fffffffffffff0,false,true),(0x00fffffffffffff8,false,false),
+    (0xff00000000000000,false,true),(0xfffffffffffffff0,true,true),
+    (0xfffffffffffffff8,true,true)] : List (Val × Bool × Bool)).all (fun (a,lo,hi) =>
+      [(LinearAddressWidth.la48,lo),(.la57,hi)].all (fun (width,valid) =>
+        [false,true].all (fun store => [false,true].all (fun deny =>
+          let cpu := vectorEntry a
+          let p : MemoryProfile := { readable := fun _ => !deny, writable := fun _ => !deny }
+          let i : Instr := { op := if store then .vstore .dqu { base := some .rbx } .x0 else .vload .dqu .x0 { base := some .rbx }, len := 3 }
+          let t := stepChecked i { cpu, addressWidth := width, profile := some p, events := [prior] }
+          let fault := if !valid then some (ExecutionFault.nonCanonical a)
+            else if deny then some (if store then .write a 16 else .read a 16) else none
+          t.fault == fault && t.cpu.ms.isNone && sameCpu t.cpu (if fault.isNone then step i cpu width else cpu) &&
+          t.events == [prior] ++ (match fault with | some f => [.fault f] | none => [.memory (if store then .write else .read) a (vbytes 16 (if store then xmmInput else vector)) store]))))) = true := by decide
+
+-- MOVS exposes one real iteration. Completed earlier iterations remain committed.
+private def checkMovs (sz : Size) : Bool := [false,true].all (fun repeated =>
+  [false,true].all (fun backward => ([0,1,2] : List Val).all (fun count => (List.range 9).all (fun mode =>
+    let base := entry address initial
+    let cpu := { base with regs := ((base.regs.set .rsi address).set .rdi 0x2000).set .rcx count, flags := { base.flags with df := backward } }
+    let p : MemoryProfile :=
+      { readable := fun a => !((mode == 1 || mode == 2 || mode == 5) && a == (if mode == 2 then address+BitVec.ofNat 64 (sz.bytes-1) else address)),
+        writable := fun a => !((mode == 3 || mode == 4 || mode == 5) && a == (if mode == 4 then 0x2000+BitVec.ofNat 64 (sz.bytes-1) else 0x2000)),
+        initialized := fun a => mode != 6 && (mode != 7 || a == address) }
+    let i : Instr := { op := if repeated then .repstrop .rep .movs sz else .strop .movs sz, len := 3 }
+    let t := stepChecked i { cpu, profile := if mode == 8 then none else some p, events := [prior] }
+    let access := !repeated || count != 0
+    let missing := access && mode == 8
+    let deniedRead := access && (mode == 1 || mode == 2 || mode == 5)
+    let deniedWrite := access && (mode == 3 || mode == 4 || mode == 5)
+    let fault := if missing then none else if deniedRead then some (ExecutionFault.read address sz.bytes)
+      else if deniedWrite then some (.write 0x2000 sz.bytes) else none
+    let success := !missing && fault.isNone
+    let delta : Val := if backward then 0-BitVec.ofNat 64 sz.bytes else BitVec.ofNat 64 sz.bytes
+    let events := [prior] ++ (if access && !missing && !deniedRead then
+        [.memory .read address (bytes sz.bytes initial) (mode != 6 && (mode != 7 || sz == .b))] else []) ++
+      (match fault with | some f => [.fault f] | none => if success && access then [.memory .write 0x2000 (bytes sz.bytes initial) true] else [])
+    t.fault == fault && t.events == events &&
+    if missing then t.cpu.ms.isSome && sameCpu { t.cpu with ms := none } cpu
+    else t.cpu.ms.isNone && sameCpu t.cpu (if success then step i cpu else cpu) &&
+      t.cpu.regs.rsi == (if success && access then address+delta else address) &&
+      t.cpu.regs.rdi == (if success && access then 0x2000+delta else 0x2000) &&
+      t.cpu.regs.rcx == (if success && repeated && access then count-1 else count) &&
+      t.cpu.rip == (if success then (if repeated && access then 0x4000 else 0x4003) else 0x4000) &&
+      (List.range 10).all (fun n =>
+        let a := 0x1fff+BitVec.ofNat 64 n
+        let written := success && access && 1 <= n && n <= sz.bytes
+        t.cpu.mem.read a == (if written then (initial >>> (8*(n-1))).setWidth 8 else cpu.mem.read a) &&
+        (match t.profile with | none => mode == 8 | some after => after.initialized a == (if written then true else p.initialized a)))))))
+example : checkMovs .b = true := by decide
+example : checkMovs .w = true := by decide
+example : checkMovs .d = true := by decide
+example : checkMovs .q = true := by decide
+
+private def checkMovsSequence (sz : Size) : Bool := [false,true].all (fun backward =>
+  (List.range 3).all (fun scene =>
+    let delta : Val := if backward then 0-BitVec.ofNat 64 sz.bytes else BitVec.ofNat 64 sz.bytes
+    let si : Val := address+delta
+    let di : Val := 0x2000+delta
+    let base := entry address 0
+    let cpu := { base with
+      regs := ((base.regs.set .rsi address).set .rdi 0x2000).set .rcx 2,
+      flags := { base.flags with df := backward },
+      mem := (Mem.empty.writeSize sz address 1).writeSize sz si 2 }
+    let p : MemoryProfile := { readable := fun a => !(scene == 1 && a == si), writable := fun a => !(scene == 2 && a == di) }
+    let i : Instr := { op := .repstrop .rep .movs sz, len := 3 }
+    let t := runChecked [i,i,i] { cpu, profile := some p, events := [prior] }
+    let fault := if scene == 1 then some (ExecutionFault.read si sz.bytes) else if scene == 2 then some (.write di sz.bytes) else none
+    let second := (if scene == 1 then [] else [.memory .read si (bytes sz.bytes 2) false]) ++
+      (match fault with | some f => [.fault f] | none => [.memory .write di (bytes sz.bytes 2) true])
+    t.fault == fault && t.cpu.ms.isNone && sameCpu t.cpu (if scene == 0 then run [i,i,i] cpu else step i cpu) &&
+    t.cpu.regs.rcx == (if scene == 0 then 0 else 1) && t.cpu.rip == (if scene == 0 then 0x4003 else 0x4000) &&
+    t.cpu.mem.readSize sz 0x2000 == 1 && t.cpu.mem.readSize sz di == (if scene == 0 then 2 else 0) &&
+    t.events == [prior,.memory .read address (bytes sz.bytes 1) false,.memory .write 0x2000 (bytes sz.bytes 1) true] ++ second))
+example : checkMovsSequence .b = true := by decide
+example : checkMovsSequence .w = true := by decide
+example : checkMovsSequence .d = true := by decide
+example : checkMovsSequence .q = true := by decide
+
+example : [false,true].all (fun backward =>
+    let base := entry address 0
+    let cpu := { base with
+      regs := ((base.regs.set .rsi (if backward then 0x1002 else address)).set .rdi 0x1001).set .rcx 2,
+      flags := { base.flags with df := backward }, mem := Mem.empty.writeSize .d address 0x04030201 }
+    let p : MemoryProfile := {}
+    let i : Instr := { op := .repstrop .rep .movs .b, len := 3 }
+    let t := runChecked [i,i,i] { cpu, profile := some p, events := [prior] }
+    let first : Val := if backward then 0x1002 else address
+    let last : Val := if backward then address else 0x1002
+    let value : BitVec 8 := if backward then 3 else 1
+    t.fault.isNone && t.cpu.ms.isNone && sameCpu t.cpu (run [i,i,i] cpu) &&
+    t.cpu.mem.readSize .d address == (if backward then 0x04030303 else 0x04010101) &&
+    t.events == [prior,.memory .read first [value] false,.memory .write 0x1001 [value] true,
+      .memory .read 0x1001 [value] true,.memory .write last [value] true]) = true := by decide
+
+example : ([Op.bit .bt .q (.reg .rax) (.imm 1), .vmov .dqa .x0 .x15,
+    .vmovs .d .x0 .x15, .vmovs .q .x0 .x15] : List Op).all (fun op =>
+      let cpu := vectorEntry address
+      let i : Instr := { op, len := 3 }
+      let t := stepChecked i { cpu, events := [prior] }
+      t.fault.isNone && t.cpu.ms.isNone && t.profile.isNone && t.events == [prior] && sameCpu t.cpu (step i cpu)) = true := by decide
+
+example : ([Op.bit .bt .b memory (.imm 0), .bit .bt .q (.imm 0) (.imm 0), .bit .bt .q memory memory,
+    .vmovsld .b .x0 { base := some .rbx }, .vmovsst .w { base := some .rbx } .x0,
+    .vmovs .w .x0 .x15] : List Op).all (fun op =>
+      let cpu := vectorEntry address
+      let t := stepChecked { op, len := 3 } { cpu, events := [prior] }
+      (match t.cpu.ms with | some (.illegalOperands _) => true | _ => false) &&
+      t.fault.isNone && t.events == [prior] && sameCpu { t.cpu with ms := none } cpu) = true := by decide
+
+example : ([Op.vload .dqu .x0 { base := some .rbx }, .vstore .dqa { base := some .rbx } .x0,
+    .vloadq .lo .ps .x0 { base := some .rbx }, .vmovsld .q .x0 { base := some .rbx }] : List Op).all (fun op =>
+      let cpu := vectorEntry address
+      let t := stepChecked { op, len := 3 } { cpu, events := [prior] }
+      t.cpu.ms.isSome && t.fault.isNone && t.events == [prior] && sameCpu { t.cpu with ms := none } cpu) = true := by decide
+
 end X86.Tests.CheckedAccess

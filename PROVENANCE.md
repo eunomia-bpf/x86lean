@@ -126,3 +126,21 @@ model-refusal behavior remains distinct, including its LOOP counter write.
 These are flat near transfers in the existing CET-disabled domain; no segment
 loads, far transfers, exception entry, MMU or shadow stack added. No source
 text or foreign implementation copied; no private source consulted.
+
+### 2026-11-14: checked bits, XMM moves and MOVS iteration
+
+Existing bitStringByte, memory/XMM move bodies and stringIter/REP step were read
+and reused for numeric values, flags, pointer/count and PC updates. Access spans
+now count bytes so a whole128-bit transfer can be observed without truncation.
+Intel SDM (registered), public indexed MOVDQA/legacy SSE alignment excerpts:
+https://cdrdv2-public.intel.com/789581/325383-sdm-vol-2abcd.pdf and
+https://cdrdv2-public.intel.com/835781/325462-sdm-vol-1-2abcd-3abcd-4.pdf .
+MOVDQA-family aligned memory requires16byte alignment; unaligned forms do not.
+REP restart state was consulted in public indexed REP text at
+https://cdrdv2-public.intel.com/835757/325383-sdm-vol-2abcd.pdf .
+Successful MOVS iterations survive a later fault, with current pointers/count
+and pending instruction PC. REP comparisons have a distinct EFLAGS restoration
+rule, so they are not included in this MOVS extension. No manual text or other
+model implementation copied; no private source read. Bit access footprint is
+that of the actual fork step (register index: selected byte, immediate: operand
+unit); the separate native word/byte observation relation belongs to migration.

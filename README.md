@@ -302,8 +302,22 @@ RET target keeps its stack-read event without popping. A typed LOOP target
 fault keeps the incoming counter, while the default step retains its original
 model-refusal behavior. Successful transfers use the original numerical step.
 These are the existing CET-disabled near forms, without far transfers, shadow
-stacks or instruction fetch. Bit-test/string/vector accesses and atomic/LOCK
-operations remain unported to this optional entry point.
+stacks or instruction fetch.
+
+Bit tests/modifications use the original `bitStringByte`: register-indexed
+memory accesses touch the selected byte, while immediate-indexed forms access
+the operand-sized unit. Checked legacy XMM moves cover full128-bit, half64-bit
+and scalar32/64-bit transfers; aligned forms have a typed16-byte misalignment
+fault. Every byte, including the upper64 bits, participates in permissions,
+initialization and events. These are full-span transfers; a separate native
+split-word observation relation is not implied by their footprint.
+
+MOVS and REP MOVS expose the original step's single iteration. Reads precede
+stores; a fault keeps completed earlier iterations and the pending count,
+pointers and PC. The original extra count-zero step advances past REP MOVS.
+Overlapping copies see earlier writes and their initialization metadata.
+Atomic/LOCK operations and other unported classes still refuse; other string
+and SIMD classes are outside this extension's scope.
 `Tests.CheckedAccess` checks ordered faults/effects and both numerical-step
 agreement and independent load/store values using kernel `decide`.
 

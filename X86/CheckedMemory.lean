@@ -24,6 +24,7 @@ inductive ExecutionFault where
   | nonCanonical (address : Val)
   | invalidOpcode
   | divideError
+  | misaligned (address : Val) (bytes : Nat)
   deriving DecidableEq, BEq, Repr
 
 inductive MemoryAccessKind where
@@ -52,7 +53,8 @@ end CheckedState
 
 private structure AccessSpan where
   address : Val
-  size : Size
+  bytes : Nat
+  aligned : Bool := false
 
 /-- Supported scalar forms have reads followed by at most one final store.
 Instructions with intermediate commits need their own shared iteration seam. -/
@@ -62,7 +64,7 @@ private structure AccessPlan where
   target : Option Val := none
 
 private def spanFor (s : Cpu) (nr : Val) (size : Size) : Operand → Option AccessSpan
-  | .mem ea => some { address := ea.addr s nr, size }
+  | .mem ea => some { address := ea.addr s nr, bytes := size.bytes }
   | _ => none
 
 private def sourcePlan (valid : Bool) (s : Cpu) (nr : Val) (size : Size)
@@ -122,31 +124,59 @@ private def accessPlan (i : Instr) (s : Cpu) : Except MsErr AccessPlan :=
     else .ok { reads := (spanFor s nr sz src).toList, store := spanFor s nr sz dst }
   | .push sz src =>
     if sz != .w && sz != .q then .error (.illegalOperands "Invalid checked PUSH width")
-    else .ok { reads := (spanFor s nr sz src).toList, store := some { address := s.regs.get .rsp - BitVec.ofNat 64 sz.bytes, size := sz } }
+    else .ok { reads := (spanFor s nr sz src).toList, store := some { address := s.regs.get .rsp - BitVec.ofNat 64 sz.bytes, bytes := sz.bytes } }
   | .pop sz dst =>
     if (sz != .w && sz != .q) || dst.isImm then .error (.illegalOperands "Invalid checked POP operands/width")
-    else .ok { reads := [{ address := s.regs.get .rsp, size := sz }], store := spanFor (s.popValue sz).2 nr sz dst }
+    else .ok { reads := [{ address := s.regs.get .rsp, bytes := sz.bytes }], store := spanFor (s.popValue sz).2 nr sz dst }
   | .jmp target | .call target =>
     match target with
     | .indirect (.imm _) => .error (.illegalOperands "Invalid checked indirect target")
     | _ =>
       let reads := match target with | .rel _ => [] | .indirect src => (spanFor s nr .q src).toList
       let store := match i.op with
-        | .call _ => some { address := s.regs.get .rsp - 8, size := Size.q }
+        | .call _ => some { address := s.regs.get .rsp - 8, bytes := 8 }
         | _ => none
       .ok { reads, store, target := some (target.resolve s nr) }
-  | .ret => .ok { reads := [{ address := s.regs.get .rsp, size := .q }], target := some (s.readMem .q (s.regs.get .rsp)) }
+  | .ret => .ok { reads := [{ address := s.regs.get .rsp, bytes := 8 }], target := some (s.readMem .q (s.regs.get .rsp)) }
   | .jcc condition displacement => .ok { target := if condition.eval s.flags then some (nr + displacement) else none }
   | .jcxz addr32 displacement => .ok { target := if s.jcxzTaken addr32 then some (nr + displacement) else none }
   | .loop kind addr32 displacement =>
     .ok { target := if kind.taken (s.loopCount addr32) s.flags.zf then some (nr + displacement) else none }
+  | .bit k sz (.mem ea) (.reg reg high) =>
+    if sz == .b then .error (.illegalOperands "Invalid checked bit-test width")
+    else
+      let span : AccessSpan := { address := bitStringByte s sz ea reg high nr, bytes := 1 }
+      .ok { reads := [span], store := if k == .bt then none else some span }
+  | .bit k sz dst offset =>
+    if sz == .b || dst.isImm || offset.isMem then .error (.illegalOperands "Invalid checked bit-test operands/width")
+    else .ok { reads := (spanFor s nr sz dst).toList, store := if k == .bt then none else spanFor s nr sz dst }
+  | .vmov .. => .ok {}
+  | .vmovs sz .. =>
+    if vmovsEncodable sz then .ok {} else .error (.illegalOperands "Invalid checked scalar vector width")
+  | .vload kind _ ea =>
+    .ok { reads := [{ address := ea.addr s nr, bytes := 16, aligned := kind.aligned }] }
+  | .vstore kind ea _ =>
+    .ok { store := some { address := ea.addr s nr, bytes := 16, aligned := kind.aligned } }
+  | .vloadq _ _ _ ea => .ok { reads := [{ address := ea.addr s nr, bytes := 8 }] }
+  | .vstoreq _ _ ea _ => .ok { store := some { address := ea.addr s nr, bytes := 8 } }
+  | .vmovsld sz _ ea | .vmovgld sz _ ea =>
+    if !vmovsEncodable sz then .error (.illegalOperands "Invalid checked scalar vector width")
+    else .ok { reads := [{ address := ea.addr s nr, bytes := sz.bytes }] }
+  | .vmovsst sz ea _ | .vmovgst sz ea _ =>
+    if !vmovsEncodable sz then .error (.illegalOperands "Invalid checked scalar vector width")
+    else .ok { store := some { address := ea.addr s nr, bytes := sz.bytes } }
+  | .strop .movs sz =>
+    .ok { reads := [{ address := s.regs.get .rsi, bytes := sz.bytes }], store := some { address := s.regs.get .rdi, bytes := sz.bytes } }
+  | .repstrop .rep .movs sz =>
+    if s.regs.get .rcx == 0 then .ok {} else
+    .ok { reads := [{ address := s.regs.get .rsi, bytes := sz.bytes }], store := some { address := s.regs.get .rdi, bytes := sz.bytes } }
   | _ => .error (.unimplemented "Checked access is not yet supported for this instruction class")
 
 private def permitted (p : Val → Bool) (span : AccessSpan) : Bool :=
-  (Mem.span span.size span.address).all p
+  (List.range span.bytes |>.map (fun offset => span.address + BitVec.ofNat 64 offset)).all p
 
 private def bytesAt (m : Mem) (span : AccessSpan) : List (BitVec 8) :=
-  (Mem.span span.size span.address).map m.read
+  (List.range span.bytes |>.map (fun offset => span.address + BitVec.ofNat 64 offset)).map m.read
 
 private def fail (s : CheckedState) (fault : ExecutionFault) : CheckedState :=
   { s with fault := some fault, events := s.events ++ [.fault fault] }
@@ -160,12 +190,13 @@ private def validate (kind : MemoryAccessKind) (span : AccessSpan) (s : CheckedS
   | some profile =>
     if !permitted (fun address => canonical address s.addressWidth) span then
       fail s (.nonCanonical span.address)
+    else if span.aligned && !aligned16 span.address then fail s (.misaligned span.address 16)
     else
       let permission := match kind with | .read => profile.readable | .write => profile.writable
       if !permitted permission span then
         fail s (match kind with
-          | .read => .read span.address span.size.bytes
-          | .write => .write span.address span.size.bytes)
+          | .read => .read span.address span.bytes
+          | .write => .write span.address span.bytes)
       else match kind with
         | .write => s -- Deferred until the actual numeric step succeeds.
         | .read =>
@@ -183,7 +214,7 @@ private def commit (span : Option AccessSpan) (before : CheckedState) (cpu : Cpu
     | none => refuse before (.unimplemented "Checked store lost its validated profile")
     | some profile =>
       let initialized := fun address =>
-        if (address - span.address).toNat < span.size.bytes then true else profile.initialized address
+        if (address - span.address).toNat < span.bytes then true else profile.initialized address
       let event := MemoryAccessEvent.memory .write span.address (bytesAt cpu.mem span) true
       { before with cpu, profile := some { profile with initialized }, events := before.events ++ [event] }
 
