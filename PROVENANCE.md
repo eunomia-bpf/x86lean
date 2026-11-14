@@ -172,3 +172,11 @@ their D52 memory refusal; their existing differential leak gate is unchanged.
 The public Intel manual reference remains
 https://cdrdv2-public.intel.com/671110/325383-sdm-vol-2abcd.pdf .
 No foreign model or manual text copied; no private source consulted.
+
+### 2026-11-14: platform memory read-plan interface
+
+plannedReadAddresses projects the existing checked access plan for functional
+memory adapters. No new ISA, numeric, flag, address or permission rule is added.
+The adapter must rerun checked execution after supplying bytes, including
+recomputation of data-dependent control targets. This is an interface over
+this fork's own implementation; no foreign model or private source consulted.

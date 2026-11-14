@@ -273,6 +273,11 @@ layer captures effective addresses using the same `Ea.addr` before execution.
 The original `Cpu`, `step`, `run` and their characterization theorems retain
 their existing domain.
 
+`X86.plannedReadAddresses` exposes potential input bytes from that same access
+plan for platform bindings with functional memory. It grants no permission;
+checked execution revalidates accesses and recomputes data-dependent targets
+from the materialized values. No second instruction-footprint table is needed.
+
 Memory operands require an explicit `MemoryProfile` with byte permissions and
 initialization metadata. Every byte is checked for the selected 48/57-bit
 canonicality before permissions. Reads expose actual memory values and their

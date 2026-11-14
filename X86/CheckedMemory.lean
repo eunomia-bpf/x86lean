@@ -171,6 +171,20 @@ private def accessPlan (i : Instr) (s : Cpu) : Except MsErr AccessPlan :=
     .ok { reads := [{ address := s.regs.get .rsi, bytes := sz.bytes }], store := some { address := s.regs.get .rdi, bytes := sz.bytes } }
   | _ => .error (.unimplemented "Checked access is not yet supported for this instruction class")
 
+/-- Potential input bytes for a platform memory view, using the very same
+access plan as checked execution. This does not grant access: stepChecked must
+still check canonicality, alignment and permissions, and recompute targets from
+the supplied bytes. An adapter can materialize arbitrary functional memory into
+the finite Mem representation without duplicating instruction footprints. -/
+def plannedReadAddresses (i : Instr) (s : Cpu) : Except MsErr (List Val) :=
+  if s.stopped || i.op.lockIllegal then .ok [] else
+  match i.op with
+  | .ud2 => .ok []
+  | _ => do
+    let plan ← accessPlan i s
+    pure (plan.reads.flatMap (fun span =>
+      (List.range span.bytes).map (fun offset => span.address + BitVec.ofNat 64 offset)))
+
 private def permitted (p : Val → Bool) (span : AccessSpan) : Bool :=
   (List.range span.bytes |>.map (fun offset => span.address + BitVec.ofNat 64 offset)).all p
 
