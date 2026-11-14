@@ -26,3 +26,4 @@ import X86.Program
 import X86.Logic
 import X86.Coverage
 import X86.Serialize
+import X86.CheckedMemory

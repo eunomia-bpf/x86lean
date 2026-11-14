@@ -80,3 +80,18 @@ unlike the intended ordering; the source and limited use are recorded rather
 than retroactively claiming otherwise. The older kprog reference interface was
 inspected to identify the existing 48/57-bit domain that migration must preserve;
 it is not an independent x86 ISA authority. No employer/private source was read.
+
+### 2026-11-14: checked flat-memory scalar access
+
+The numerical semantics remains the existing X86.step. This extension adds
+permission/initialization observations at an explicitly supplied flat-memory
+boundary, not page-table translation, physical fault error codes or a new ISA
+interpreter. Intel SDM revision089 (already registered above), CMOVcc operation
+and description (Vol.2A, CMOVcc), was consulted in its public text excerpt at
+https://cdrdv2-public.intel.com/868137/325462-089-sdm-vol-1-2abcd-3abcd-4.pdf .
+It establishes that the memory source access happens regardless of the selected
+condition. The checked plan observes that access while the original numeric
+step selects the destination value. No manual text or other model code copied.
+The old kprog reference memory API was read to identify the retained arbitrary
+byte/permission/ghost-initialization and ordered-prefix domains. It supplies
+migration requirements, not an independent rule for x86 arithmetic or flags.

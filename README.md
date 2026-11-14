@@ -264,6 +264,32 @@ spends three (CF, OF, AF). `Tests/Nonvacuity.lean` proves both halves of the
 claim: the undefined bits really do move with the oracle, and the **defined**
 ones really do not.
 
+## Optional checked scalar memory
+
+`X86.stepChecked` and `X86.runChecked` execute a `CheckedState` around the
+existing `Cpu`. Successful numerical results come from `X86.step`; the access
+layer captures effective addresses using the same `Ea.addr` before execution.
+The original `Cpu`, `step`, `run` and their characterization theorems retain
+their existing domain.
+
+Memory operands require an explicit `MemoryProfile` with byte permissions and
+initialization metadata. Every byte is checked for the selected 48/57-bit
+canonicality before permissions. Reads expose actual memory values and their
+initialization status; an uninitialized byte is not replaced by zero. A denied
+store retains earlier read events but commits no CPU state. Successful stores
+initialize their exact wrapping byte range. These are flat-memory faults and
+effects, without page tables, CR2/error codes or exception entry.
+
+Supported classes are MOV, ordinary binary/unary arithmetic (including
+CMP/TEST), extending loads, CMOV and SETcc; LEA and NOP need no memory access.
+CMOV reads a memory source even when its condition is false. UD2 and illegal
+LOCK uses have a typed invalid-opcode outcome. Missing profiles and unported
+classes produce `MsErr` model refusals, with no total-memory fallback. In
+particular, stack/control transfers, shifts/rotates, strings, vector accesses
+and atomic/LOCK operations remain unported to this optional entry point.
+`Tests.CheckedAccess` checks ordered faults/effects and both numerical-step
+agreement and independent load/store values using kernel `decide`.
+
 ## Building
 
 ```bash
