@@ -31,6 +31,8 @@ was not the publication decision then and is not one now.
 | Lean 4 · mathlib4 | github.com/leanprover/lean4 · github.com/leanprover-community/mathlib4 | Apache-2.0 | The prover and its library |
 | LNSym | github.com/leanprover/LNSym | Apache-2.0 | PRECEDENT only (an Arm ISA in Lean 4 with hardware conformance testing); no code is copied |
 | libLISA semantics | code: github.com/libLISA/liblisa (`liblisa-semantics-tool` 0.3.0); data: OSF project 2hfq9, `semantics.7z` (linked from the tool's README) | Code: AGPL-3.0 (repository LICENSE, checked 2026-09-12). Data: **no licence stated** (OSF `node_license` null, 2026-09-12) | EVIDENCE only, processor-synthesized dataflows queried for the rules of `Main.lean knownDivergences` (D221, `docs/LIBLISA-HARDWARE-CHECK-2026-09-12.md`). No rule of the model was decided by it; no data or code is copied here; the tool is built under `vendor/` (ignored). ⚠️ This row was added AFTER the reading, the same evening. Rule 1 binds reading *for the model*, which this was not, but the order is stated rather than left to be inferred |
+| Linux x86 headers | https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/arch/x86/include/asm/ | GPL-2.0 (per-file SPDX checked below) | Corroboration only of the canonical-width convention; no source code copied. The semantic rule remains Intel SDM. Initial line-level grep preceded this entry; that ordering is recorded explicitly. |
+
 
 ## Rules
 1. A source enters this table BEFORE any file from it is read for the model.
@@ -62,3 +64,19 @@ A defect this repository found in a source it executes is reported to that sourc
 | filed | source | report | what it says | where the evidence is |
 |---|---|---|---|---|
 | 2026-10-11 | ACL2 x86isa, `machine/instructions/bit.lisp` (read at acl2 `c8897a34d3ef`) | [acl2/acl2#2066](https://github.com/acl2/acl2/issues/2066) | BT/BTS/BTR/BTC with a memory bit base and a negative register offset select bit `(mod (abs off) 8)`; the SDM selects `off AND 7`. Four sites. `sail-x86-from-acl2` inherits it at one site (`model/bit.sail`), reported there as [rems-project/sail-x86-from-acl2#7](https://github.com/rems-project/sail-x86-from-acl2/issues/7). A fifth processor (AMD EPYC 9V74) was added to #2066 as a comment the same day. | D331 (the model, and the per-state declared divergence) and D333 (the silicon referee) in `docs/DECISIONS.md` |
+
+### 2026-11-14: selectable 48/57-bit paging canonicality
+
+Intel SDM was already in the licence table before this reading. Consulted the
+public text excerpt of combined revision 089 (`325462-089-sdm-vol-1-2abcd-3abcd-4.pdf`,
+Intel copyright) at https://cdrdv2-public.intel.com/868137/325462-089-sdm-vol-1-2abcd-3abcd-4.pdf .
+The definition distinguishes four-level (bits63:47 equal) and five-level
+(bits63:56 equal) paging canonical addresses. This is the rule used here;
+LAM/tag masking, paging translation and exception delivery are outside it.
+Linux `arch/x86/include/asm/{page.h,page_64_types.h}` was additionally inspected
+for corroboration of width/sign-extension conventions (GPL-2.0, no code copied).
+That initial header-line inspection occurred before adding its table row above,
+unlike the intended ordering; the source and limited use are recorded rather
+than retroactively claiming otherwise. The older kprog reference interface was
+inspected to identify the existing 48/57-bit domain that migration must preserve;
+it is not an independent x86 ISA authority. No employer/private source was read.

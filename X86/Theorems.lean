@@ -33,6 +33,25 @@ import X86.Semantics
 
 namespace X86
 
+/-- The shifted-bits test equals sign-extension at the selected width for
+all64-bit inputs. This proof follows the library's simp/omega discipline. -/
+theorem canonical_eq_signExtend (v : BitVec 64) (width : LinearAddressWidth) :
+    canonical v width = ((v.setWidth width.bits).signExtend 64 == v) := by
+  have bound := v.isLt
+  cases width <;> apply Bool.eq_iff_iff.mpr <;>
+    simp [canonical, LinearAddressWidth.bits, ← BitVec.toNat_inj,
+      BitVec.toNat_signExtend, BitVec.msb_eq_decide, Nat.shiftRight_eq_div_pow] <;> split <;> omega
+
+/-- Every48-bit canonical address is also57-bit canonical. -/
+theorem canonical_48_implies_57 (v : BitVec 64) (h : canonical v .la48 = true) :
+    canonical v .la57 = true := by
+  have bound := v.isLt
+  simp [canonical, ← BitVec.toNat_inj, Nat.shiftRight_eq_div_pow] at h
+  simp [canonical, ← BitVec.toNat_inj, Nat.shiftRight_eq_div_pow]
+  omega
+
+
+
 /-- The hypothesis every characterization theorem carries: the model has not
 already stopped.  A stopped model does not move (`step_stopped`), so this
 restricts which equation applies, not the semantics. -/

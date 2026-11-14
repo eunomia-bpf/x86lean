@@ -114,20 +114,24 @@ theorem Ea.addr_eq_segBase_add (ea : Ea) (s : Cpu) (nr : BitVec 64) :
     ea.addr s nr = s.segBase ea.seg + ea.offset s nr := by
   cases h : ea.seg <;> simp [Ea.addr, h]
 
-/-- CANONICAL ADDRESS (SDM Vol. 1 §3.3.7.1).  In 64-bit mode only the low 48
-bits of a linear address are implemented; bits 63:48 must be a sign extension of
-bit 47.  A branch to a non-canonical target raises #GP(0) (SDM Vol. 2A, JMP and
-CALL, "64-Bit Mode Exceptions").
+/-- Paging linear-address width selected by the platform's current CR4.LA57.
+This does not enable LAM, page translation, permissions or exception delivery. -/
+inductive LinearAddressWidth where
+  | la48 | la57
+  deriving DecidableEq, Repr
 
-⭐ THIS PREDICATE EXISTS BECAUSE THE DIFFERENTIAL RUN FOUND ITS ABSENCE.  The
-first run against ACL2 x86isa produced 80 unexplained disagreements, every one
-of them an indirect `jmp` or `call` to a non-canonical target: this model set
-RIP to it, and x86isa raised #GP.  No anchor and no characterization theorem
-could have caught that — the model was self-consistently wrong, which is exactly
-the failure a second model is for. -/
-def canonical (v : BitVec 64) : Bool :=
-  -- bits 63:47 are all equal: shifting them down leaves all-zeros or all-ones
-  (v >>> 47) == 0 || (v >>> 47) == 0x1FFFF
+def LinearAddressWidth.bits : LinearAddressWidth → Nat
+  | .la48 => 48
+  | .la57 => 57
+
+/-- Paging-canonical address (Intel SDM Vol.1 section3.3.7.1): bits63:47 are
+identical for four-level paging; bits63:56 are identical for five-level paging.
+Default48 preserves the existing user-level domain and characterization rules.
+See PROVENANCE.md for the public SDM source; this is not LAM/tag masking. -/
+def canonical (v : BitVec 64) (width : LinearAddressWidth := .la48) : Bool :=
+  match width with
+  | .la48 => (v >>> 47) == 0 || (v >>> 47) == 0x1FFFF
+  | .la57 => (v >>> 56) == 0 || (v >>> 56) == 0xFF
 
 /-- ⭐ SIXTEEN-BYTE ALIGNMENT: the predicate `movdqa` faults on and `movdqu` does
 not (SDM Vol. 2B, MOVDQA).  It lives beside `canonical` because they are the same
@@ -157,8 +161,9 @@ jumping somewhere impossible.
 is unreachable in the P0 vectors (RIP is 0x400000 and instructions are short) so
 the differential run has not exercised it, and an unexercised fix is a guess —
 it is recorded in docs/DECISIONS.md as a P1 item rather than written blind. -/
-def setRipChecked (s : Cpu) (v : BitVec 64) : Cpu :=
-  if canonical v then { s with rip := v }
+def setRipChecked (s : Cpu) (v : BitVec 64)
+    (width : LinearAddressWidth := .la48) : Cpu :=
+  if canonical v width then { s with rip := v }
   else s.halt (.unimplemented "non-canonical branch target (#GP(0) in hardware)")
 
 /-- Read an operand at width `sz`. -/
@@ -1344,7 +1349,7 @@ theorem about a VEX form keeps its proof, and only its statement gains the `.vex
       (s.setYmm dst (vabsApply w (s.readMem128 a)) (vabsApply w (s.readMem128 (a + 16)))).setRip nr
 
 /-- The small-step transition.  A stopped model does not move. -/
-def step (i : Instr) (s : Cpu) : Cpu :=
+def step (i : Instr) (s : Cpu) (addressWidth : LinearAddressWidth := .la48) : Cpu :=
   if s.stopped then s else
   -- ⭐⭐ P2 ITEM 2: THE LOCK WELL-FORMEDNESS RULE, CHECKED ONCE AND BEFORE THE
   -- MATCH.  A `lock` on a form the SDM does not list is #UD on real silicon
@@ -2082,7 +2087,7 @@ def step (i : Instr) (s : Cpu) : Cpu :=
   | .bit k sz (.mem ea) (.reg r h8) =>
       let o := s.getReg sz r h8
       let ba := bitStringByte s sz ea r h8 nr
-      if !canonical ba then
+      if !canonical ba addressWidth then
         s.halt (.unimplemented "non-canonical bit-string byte address (#GP(0) in hardware)")
       else
         let a := s.readMem .b ba
@@ -2150,10 +2155,10 @@ def step (i : Instr) (s : Cpu) : Cpu :=
   -- JMP Jcc CALL (SDM Vol. 2A).  "Flags Affected: None" for all three.
   | .jmp t =>
       match t with
-      | .rel d => s.setRipChecked (nr + d)
-      | .indirect o => s.setRipChecked (s.readOperand .q nr o)
+      | .rel d => s.setRipChecked (nr + d) addressWidth
+      | .indirect o => s.setRipChecked (s.readOperand .q nr o) addressWidth
   | .jcc c d =>
-      if c.eval s.flags then s.setRipChecked (nr + d) else s.setRip nr
+      if c.eval s.flags then s.setRipChecked (nr + d) addressWidth else s.setRip nr
   -- JRCXZ / JECXZ (SDM Vol. 2A, JCC).  ⚠️ THE ONLY BRANCH WHOSE CONDITION IS A
   -- REGISTER, and the width of the register it reads is what the address-size
   -- prefix selects: `jecxz` tests ECX — the LOW 32 BITS — and `jrcxz` tests all
@@ -2163,7 +2168,7 @@ def step (i : Instr) (s : Cpu) : Cpu :=
   -- "Flags Affected: None."
   | .jcxz addr32 d =>
       let c := if addr32 then Value.trunc .d (s.regs.get .rcx) else s.regs.get .rcx
-      if c == 0 then s.setRipChecked (nr + d) else s.setRip nr
+      if c == 0 then s.setRipChecked (nr + d) addressWidth else s.setRip nr
   -- SETcc (SDM Vol. 2A, SETcc): ONE BYTE, 1 or 0.  "Flags Affected: None."
   | .setcc c dst =>
       (s.writeOperand .b nr dst (if c.eval s.flags then 1 else 0)).setRip nr
@@ -2293,7 +2298,7 @@ def step (i : Instr) (s : Cpu) : Cpu :=
         | .loop   => cnt' != 0
         | .loope  => cnt' != 0 && zf
         | .loopne => cnt' != 0 && !zf
-      if taken then s.setRipChecked (nr + d) else s.setRip nr
+      if taken then s.setRipChecked (nr + d) addressWidth else s.setRip nr
 
   -- CLC / STC / CMC / CLD / STD (SDM Vol. 2A).  Each writes ONE flag; "all
   -- other flags are unaffected" (ACL2 x86isa `x86-cmc/clc/stc/cld/std` says the
@@ -2338,7 +2343,7 @@ def step (i : Instr) (s : Cpu) : Cpu :=
   | .ret =>
       let sp := s.regs.get .rsp
       let tgt := s.readMem .q sp
-      if canonical tgt then
+      if canonical tgt addressWidth then
         { s.setReg .q .rsp (sp + 8) with rip := tgt }
       else s.halt (.unimplemented "non-canonical return address (#GP(0) in hardware)")
 
@@ -2543,13 +2548,13 @@ def step (i : Instr) (s : Cpu) : Cpu :=
           -- the first run disagreed on `rsp` and on the stack window as well as
           -- on `rip`, which is what says the ordering is observable and not a
           -- detail.
-          if canonical (nr + d) then (s.push .q nr).setRip (nr + d)
+          if canonical (nr + d) addressWidth then (s.push .q nr).setRip (nr + d)
           else s.halt (.unimplemented "non-canonical branch target (#GP(0) in hardware)")
       | .indirect o =>
           -- the target is read BEFORE the return address is pushed, so a
           -- `call [rsp]` reads the pre-push stack.
           let tgt := s.readOperand .q nr o
-          if canonical tgt then (s.push .q nr).setRip tgt
+          if canonical tgt addressWidth then (s.push .q nr).setRip tgt
           else s.halt (.unimplemented "non-canonical branch target (#GP(0) in hardware)")
 
   -- MUL · IMUL · DIV · IDIV, the ONE-OPERAND forms (SDM Vol. 2A).  See
@@ -2948,7 +2953,8 @@ def step (i : Instr) (s : Cpu) : Cpu :=
 /-- Run `n` steps of a straight-line list of decoded instructions, taking each
 in order.  P0 does not fetch-and-decode from memory (that is P4's Lean decoder);
 this is the shape the differential harness drives. -/
-def run (is : List Instr) (s : Cpu) : Cpu := is.foldl (fun s i => step i s) s
+def run (is : List Instr) (s : Cpu) (addressWidth : LinearAddressWidth := .la48) : Cpu :=
+  is.foldl (fun s i => step i s addressWidth) s
 
 @[simp] theorem run_nil (s : Cpu) : run [] s = s := rfl
 @[simp] theorem run_cons (i : Instr) (is : List Instr) (s : Cpu) :
