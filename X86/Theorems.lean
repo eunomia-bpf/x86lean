@@ -1799,7 +1799,8 @@ theorem step_dshift_mem_undefined_refuses (k : DShiftKind) (ea : Ea) (c : BitVec
           "shld/shrd: an undefined RESULT in memory (16-bit operand, count > 16)") } := by
   have he : dshiftEncodable .w = true := by decide
   have hm : dshiftMemUndefined .w true (Flags.shiftCount .w c) = true := by
-    simpa only [dshiftMemUndefined, Bool.true_and, decide_eq_true_eq, Size.bits] using hc
+    change decide (16 < Flags.shiftCount .w c) = true
+    exact decide_eq_true hc
   simp [step, h, he, hm, hl, Cpu.halt, Operand.isImm, Operand.isMem]
 
 /-- ⭐⭐ A COUNT OF ZERO TOUCHES NO FLAG — AND STILL WRITES THE DESTINATION.  D54:
