@@ -95,3 +95,17 @@ step selects the destination value. No manual text or other model code copied.
 The old kprog reference memory API was read to identify the retained arbitrary
 byte/permission/ghost-initialization and ordered-prefix domains. It supplies
 migration requirements, not an independent rule for x86 arithmetic or flags.
+
+### 2026-11-14: checked shifts and scalar sources
+
+The existing numeric Semantics/Value/Flags functions were consulted and reused,
+not reimplemented. Scalar access direction/size is taken from those actual
+opcode bodies. Their zero-count RMW writeback and double-shift undefined-memory
+refusal remain intact. Intel SDM, already registered, public Vol2 DIV/IDIV
+text excerpts were consulted: https://cdrdv2-public.intel.com/789581/325383-sdm-vol-2abcd.pdf
+and https://cdrdv2-public.intel.com/874240/325462-090-sdm-vol-1-2abcd-3abcd-4.pdf .
+Zero divisors and quotient overflow cause #DE. The checked entry uses the same
+Value.divPairU/divPairS Option result as the original step to classify that
+outcome after operand access; no new division algorithm or manual text copied.
+The combined revision089 PDF fetch was too large; the above public primary
+excerpts were used. No secondary model code was consulted or copied.

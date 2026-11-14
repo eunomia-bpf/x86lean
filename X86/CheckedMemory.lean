@@ -23,6 +23,7 @@ inductive ExecutionFault where
   | write (address : Val) (bytes : Nat)
   | nonCanonical (address : Val)
   | invalidOpcode
+  | divideError
   deriving DecidableEq, BEq, Repr
 
 inductive MemoryAccessKind where
@@ -63,6 +64,11 @@ private def spanFor (s : Cpu) (nr : Val) (size : Size) : Operand → Option Acce
   | .mem ea => some { address := ea.addr s nr, size }
   | _ => none
 
+private def sourcePlan (valid : Bool) (s : Cpu) (nr : Val) (size : Size)
+    (src : Operand) : Except MsErr AccessPlan :=
+  if !valid || src.isImm then .error (.illegalOperands "Invalid checked scalar source/width")
+  else .ok { reads := (spanFor s nr size src).toList }
+
 /-- Operand effects only: no duplicate numeric or flag interpretation.
 CMOV memory sources are read even when the value is not selected (Intel SDM
 CMOVcc operation: the source read precedes condition evaluation). -/
@@ -90,6 +96,29 @@ private def accessPlan (i : Instr) (s : Cpu) : Except MsErr AccessPlan :=
   | .setcc _ dst =>
     if dst.isImm then .error (.illegalOperands "Invalid checked SETcc destination")
     else .ok { store := spanFor s nr .b dst }
+  | .bswap .. => .ok {} -- The numeric step retains its undefined-width refusal.
+  | .shift _ sz dst _ | .rot _ sz dst _ =>
+    if dst.isImm then .error (.illegalOperands "Invalid checked shift/rotate destination")
+    else .ok { reads := (spanFor s nr sz dst).toList, store := spanFor s nr sz dst }
+  | .dshift _ sz dst _ amt =>
+    if !dshiftEncodable sz || dst.isImm then
+      .error (.illegalOperands "Invalid checked double-shift destination/width")
+    else
+      let count := match amt with | .imm8 value => value | .cl => (s.getReg .b .rcx).setWidth 8
+      let undefinedMemory := dshiftMemUndefined sz dst.isMem (Flags.shiftCount sz count)
+      -- The shared step refuses this result AFTER reading. Do not validate a
+      -- store it will not perform, or turn that model refusal into a fault.
+      .ok { reads := (spanFor s nr sz dst).toList, store := if undefinedMemory then none else spanFor s nr sz dst }
+  | .shiftx _ sz _ src _ | .rorx sz _ src _ | .bzhi sz _ src _
+  | .andn sz _ _ src | .mulx sz _ _ src =>
+    sourcePlan (sz == .d || sz == .q) s nr sz src
+  | .bitcnt k sz _ src => sourcePlan (bitcntEncodable k sz) s nr sz src
+  | .imulr sz _ src _ => sourcePlan (imulrEncodable sz) s nr sz src
+  | .muldiv _ sz src => sourcePlan true s nr sz src
+  | .movbe sz dst src =>
+    if sz == .b || !(dst.isMem != src.isMem) || dst.isImm || src.isImm then
+      .error (.illegalOperands "Invalid checked MOVBE operands/width")
+    else .ok { reads := (spanFor s nr sz src).toList, store := spanFor s nr sz dst }
   | _ => .error (.unimplemented "Checked access is not yet supported for this instruction class")
 
 private def permitted (p : Val → Bool) (span : AccessSpan) : Bool :=
@@ -137,6 +166,18 @@ private def commit (span : Option AccessSpan) (before : CheckedState) (cpu : Cpu
       let event := MemoryAccessEvent.memory .write span.address (bytesAt cpu.mem span) true
       { before with cpu, profile := some { profile with initialized }, events := before.events ++ [event] }
 
+/-- The same shared pair calculation used by the numeric step decides #DE.
+Only the typed outcome is added here, after successful operand access. -/
+private def divisionFault (i : Instr) (s : Cpu) : Bool :=
+  match i.op with
+  | .muldiv .div sz src =>
+    (Value.divPairU sz (s.mdHi sz) (s.getReg sz .rax)
+      (s.readOperand sz (s.rip + BitVec.ofNat 64 i.len) src)).isNone
+  | .muldiv .idiv sz src =>
+    (Value.divPairS sz (s.mdHi sz) (s.getReg sz .rax)
+      (s.readOperand sz (s.rip + BitVec.ofNat 64 i.len) src)).isNone
+  | _ => false
+
 /-- Execute a supported instruction with checked effects. Every successful
 numeric result comes from the original step. A denied final store retains the
 read prefix, while registers/flags/memory/oracle/PC do not commit. A missing or
@@ -155,6 +196,7 @@ def stepChecked (i : Instr) (s : CheckedState) : CheckedState :=
       let checked := if checked.stopped then checked else
         match plan.store with | none => checked | some span => validate .write span checked
       if checked.stopped then checked else
+      if divisionFault i checked.cpu then fail checked .divideError else
         commit plan.store checked (step i checked.cpu checked.addressWidth)
 
 def runChecked (instructions : List Instr) (s : CheckedState) : CheckedState :=

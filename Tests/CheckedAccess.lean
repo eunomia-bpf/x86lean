@@ -282,4 +282,207 @@ example : (let cpu := entry address initial
       .memory .read address (bytes 8 input) true, .memory .read address (bytes 8 input) true,
       .fault (.write address 8)]) = true := by decide
 
+
+-- Width-specific, literal values for count-one shifts and rotations. The same
+-- permission/init harness checks CL and immediate forms, including zero counts.
+private def shiftRows : List (Size × Val × Val × Val × Val × Val × Val) := [
+  (.b, 0x22, 0x8, 0x8, 0x22, 0x88, 0x23),
+  (.w, 0x4422, 0x1108, 0x1108, 0x4422, 0x9108, 0x4423),
+  (.d, 0x88664422, 0x22199108, 0x22199108, 0x88664422, 0xa2199108, 0x88664423),
+  (.q, 0x10eeccaa88664422, 0x443bb32aa2199108, 0xc43bb32aa2199108,
+    0x10eeccaa88664423, 0xc43bb32aa2199108, 0x10eeccaa88664423)
+]
+
+private def checkShiftRow : (Size × Val × Val × Val × Val × Val × Val) -> Bool
+  | (sz,sl,sr,sa,rl,rr,cl) =>
+    let cases : List Case :=
+      [(ShiftKind.shl,sl),(.shr,sr),(.sar,sa)].flatMap (fun (k,v) =>
+        [ShiftAmt.imm8 1,.cl].map (fun amt =>
+          { op := .shift k sz memory amt, readBytes := sz.bytes, writeBytes := sz.bytes, stored := v })) ++
+      [(RotKind.rol,rl),(.ror,rr),(.rcl,cl),(.rcr,rr)].flatMap (fun (k,v) =>
+        [ShiftAmt.imm8 1,.cl].map (fun amt =>
+          { op := .rot k sz memory amt, readBytes := sz.bytes, writeBytes := sz.bytes, stored := v })) ++
+      [0, if sz == .q then 64 else 32].flatMap (fun n =>
+        ([ShiftKind.shl,.shr,.sar].map (fun k =>
+          { op := .shift k sz memory (.imm8 n), readBytes := sz.bytes, writeBytes := sz.bytes, stored := initial }) ++
+        [RotKind.rol,.ror,.rcl,.rcr].map (fun k =>
+          { op := .rot k sz memory (.imm8 n), readBytes := sz.bytes, writeBytes := sz.bytes, stored := initial })))
+    cases.all (fun c => (List.range 8).all (check c))
+
+example : checkShiftRow shiftRows[0] = true := by decide
+example : checkShiftRow shiftRows[1] = true := by decide
+example : checkShiftRow shiftRows[2] = true := by decide
+example : checkShiftRow shiftRows[3] = true := by decide
+
+example : ([(Size.w,0x4422,0x9108),(Size.d,0x88664422,0xa2199108),
+    (Size.q,0x10eeccaa88664422,0xc43bb32aa2199108)] : List (Size × Val × Val)).all (fun (sz,left,right) =>
+    [ShiftAmt.imm8 1,.cl].all (fun amt =>
+      [(DShiftKind.shld,left),(.shrd,right)].all (fun (k,value) =>
+        (List.range 8).all (check { op := .dshift k sz memory .rcx amt, readBytes := sz.bytes, writeBytes := sz.bytes, stored := value }))) &&
+    [DShiftKind.shld,.shrd].all (fun k =>
+      (List.range 8).all (check { op := .dshift k sz memory .rcx (.imm8 0), readBytes := sz.bytes, writeBytes := sz.bytes, stored := initial }) &&
+      (List.range 8).all (check { op := .dshift k sz memory .rcx (.imm8 (BitVec.ofNat 8 sz.bits)), readBytes := sz.bytes, writeBytes := sz.bytes, stored := if sz == .w then 1 else initial }))) = true := by decide
+
+private def scalarSources : List Case := [
+  { op := .bitcnt .popcnt .w .rax memory, readBytes := 2, rax := some 0x1122334455660004 },
+  { op := .bitcnt .lzcnt .w .rax memory, readBytes := 2, rax := some 0x1122334455660002 },
+  { op := .bitcnt .tzcnt .w .rax memory, readBytes := 2, rax := some 0x1122334455660000 },
+  { op := .bitcnt .bsf .w .rax memory, readBytes := 2, rax := some 0x1122334455660000 },
+  { op := .bitcnt .bsr .w .rax memory, readBytes := 2, rax := some 0x112233445566000d },
+  { op := .bitcnt .popcnt .w .rax memory, readBytes := 2, data := 0, rax := some 0x1122334455660000 },
+  { op := .bitcnt .lzcnt .w .rax memory, readBytes := 2, data := 0, rax := some 0x1122334455660010 },
+  { op := .bitcnt .tzcnt .w .rax memory, readBytes := 2, data := 0, rax := some 0x1122334455660010 },
+  { op := .bitcnt .bsf .w .rax memory, readBytes := 2, data := 0, rax := some 0x1122334455667788 },
+  { op := .bitcnt .bsr .w .rax memory, readBytes := 2, data := 0, rax := some 0x1122334455667788 },
+  { op := .movbe .w (.reg .rax) memory, readBytes := 2, rax := some 0x1122334455661122 },
+  { op := .movbe .w memory (.reg .rax), writeBytes := 2, stored := 0x8877 },
+  { op := .imulr .w .rax memory (some 2), readBytes := 2, rax := some 0x1122334455664422 },
+  { op := .imulr .w .rax memory none, readBytes := 2, rax := some 0x1122334455660008 },
+  { op := .bitcnt .popcnt .d .rax memory, readBytes := 4, rax := some 0xa },
+  { op := .bitcnt .lzcnt .d .rax memory, readBytes := 4, rax := some 0x1 },
+  { op := .bitcnt .tzcnt .d .rax memory, readBytes := 4, rax := some 0x0 },
+  { op := .bitcnt .bsf .d .rax memory, readBytes := 4, rax := some 0x0 },
+  { op := .bitcnt .bsr .d .rax memory, readBytes := 4, rax := some 0x1e },
+  { op := .bitcnt .blsi .d .rax memory, readBytes := 4, rax := some 0x1 },
+  { op := .bitcnt .popcnt .d .rax memory, readBytes := 4, data := 0, rax := some 0x0 },
+  { op := .bitcnt .lzcnt .d .rax memory, readBytes := 4, data := 0, rax := some 0x20 },
+  { op := .bitcnt .tzcnt .d .rax memory, readBytes := 4, data := 0, rax := some 0x20 },
+  { op := .bitcnt .bsf .d .rax memory, readBytes := 4, data := 0, rax := some 0x1122334455667788 },
+  { op := .bitcnt .bsr .d .rax memory, readBytes := 4, data := 0, rax := some 0x1122334455667788 },
+  { op := .movbe .d (.reg .rax) memory, readBytes := 4, rax := some 0x11223344 },
+  { op := .movbe .d memory (.reg .rax), writeBytes := 4, stored := 0x88776655 },
+  { op := .imulr .d .rax memory (some 2), readBytes := 4, rax := some 0x88664422 },
+  { op := .imulr .d .rax memory none, readBytes := 4, rax := some 0x37c60008 },
+  { op := .shiftx .shl .d .rax memory .rcx, readBytes := 4, rax := some 0x88664422 },
+  { op := .shiftx .shr .d .rax memory .rcx, readBytes := 4, rax := some 0x22199108 },
+  { op := .shiftx .sar .d .rax memory .rcx, readBytes := 4, rax := some 0x22199108 },
+  { op := .rorx .d .rax memory 0, readBytes := 4, rax := some 0x44332211 },
+  { op := .rorx .d .rax memory 1, readBytes := 4, rax := some 0xa2199108 },
+  { op := .bzhi .d .rax memory .rcx, readBytes := 4, rax := some 1 },
+  { op := .andn .d .rax .rcx memory, readBytes := 4, rax := some 0x44332210 },
+  { op := .mulx .d .rax .rdx memory, readBytes := 4 },
+  { op := .bitcnt .popcnt .q .rax memory, readBytes := 8, rax := some 0x1a },
+  { op := .bitcnt .lzcnt .q .rax memory, readBytes := 8, rax := some 0x0 },
+  { op := .bitcnt .tzcnt .q .rax memory, readBytes := 8, rax := some 0x0 },
+  { op := .bitcnt .bsf .q .rax memory, readBytes := 8, rax := some 0x0 },
+  { op := .bitcnt .bsr .q .rax memory, readBytes := 8, rax := some 0x3f },
+  { op := .bitcnt .blsi .q .rax memory, readBytes := 8, rax := some 0x1 },
+  { op := .bitcnt .popcnt .q .rax memory, readBytes := 8, data := 0, rax := some 0x0 },
+  { op := .bitcnt .lzcnt .q .rax memory, readBytes := 8, data := 0, rax := some 0x40 },
+  { op := .bitcnt .tzcnt .q .rax memory, readBytes := 8, data := 0, rax := some 0x40 },
+  { op := .bitcnt .bsf .q .rax memory, readBytes := 8, data := 0, rax := some 0x1122334455667788 },
+  { op := .bitcnt .bsr .q .rax memory, readBytes := 8, data := 0, rax := some 0x1122334455667788 },
+  { op := .movbe .q (.reg .rax) memory, readBytes := 8, rax := some 0x1122334455667788 },
+  { op := .movbe .q memory (.reg .rax), writeBytes := 8, stored := 0x8877665544332211 },
+  { op := .imulr .q .rax memory (some 2), readBytes := 8, rax := some 0x10eeccaa88664422 },
+  { op := .imulr .q .rax memory none, readBytes := 8, rax := some 0xa3e963337c60008 },
+  { op := .shiftx .shl .q .rax memory .rcx, readBytes := 8, rax := some 0x10eeccaa88664422 },
+  { op := .shiftx .shr .q .rax memory .rcx, readBytes := 8, rax := some 0x443bb32aa2199108 },
+  { op := .shiftx .sar .q .rax memory .rcx, readBytes := 8, rax := some 0xc43bb32aa2199108 },
+  { op := .rorx .q .rax memory 0, readBytes := 8, rax := some 0x8877665544332211 },
+  { op := .rorx .q .rax memory 1, readBytes := 8, rax := some 0xc43bb32aa2199108 },
+  { op := .bzhi .q .rax memory .rcx, readBytes := 8, rax := some 1 },
+  { op := .andn .q .rax .rcx memory, readBytes := 8, rax := some 0x8877665544332210 },
+  { op := .mulx .q .rax .rdx memory, readBytes := 8 }
+]
+example : (scalarSources.take 20).all (fun c => (List.range 8).all (check c)) = true := by decide
+example : ((scalarSources.drop 20).take 20).all (fun c => (List.range 8).all (check c)) = true := by decide
+example : (scalarSources.drop 40).all (fun c => (List.range 8).all (check c)) = true := by decide
+
+-- A source can alias the destination's address register; sources are captured
+-- before either numerical write. Register-only forms require no memory profile.
+example : ([(Op.shiftx .shl .q .rbx memory .rcx), .rorx .q .rbx memory 1,
+    .bzhi .q .rbx memory .rcx, .andn .q .rbx .rcx memory,
+    .mulx .q .rbx .rbx memory, .bitcnt .popcnt .q .rbx memory,
+    .imulr .q .rbx memory (some 2)] : List Op).all (fun op =>
+      (List.range 8).all (check { op, readBytes := 8 })) = true := by decide
+
+example : ([.shift .shl .d (.reg .rax) (.imm8 0), .rot .rcr .d (.reg .rax) (.imm8 0),
+    .dshift .shld .d (.reg .rax) .rdx (.imm8 0),
+    .shiftx .shl .d .rax (.reg .rax) .rcx, .rorx .d .rax (.reg .rax) 0,
+    .bzhi .d .rax (.reg .rax) .rcx, .andn .d .rax .rcx (.reg .rax),
+    .mulx .d .rax .rax (.reg .rax), .bitcnt .popcnt .q .rax (.reg .rax),
+    .imulr .q .rax (.reg .rax) (some 2), .bswap .d .rax, .bswap .q .rax] : List Op).all (fun op =>
+      let cpu := entry address initial
+      let i : Instr := { op, len := 3 }
+      let t := stepChecked i { cpu, events := [prior] }
+      t.fault.isNone && t.cpu.ms.isNone && t.profile.isNone && t.events == [prior] &&
+      sameCpu t.cpu (step i cpu)) = true := by decide
+
+-- Double-shift undefined memory results remain a MODEL refusal after the read,
+-- even with write permission denied. An earlier read fault takes precedence.
+example : [DShiftKind.shld,.shrd].all (fun k => [17,31].all (fun count =>
+    [false,true].all (fun deny =>
+      let cpu := entry address initial
+      let p : MemoryProfile := { readable := fun _ => !deny, writable := fun _ => false }
+      let i : Instr := { op := .dshift k .w memory .rcx (.imm8 count), len := 3 }
+      let t := stepChecked i { cpu, profile := some p, events := [prior] }
+      if deny then t.fault == some (.read address 2) && t.cpu.ms.isNone && sameCpu t.cpu cpu &&
+        t.events == [prior,.fault (.read address 2)]
+      else (match t.cpu.ms with | some (.unimplemented _) => true | _ => false) &&
+        t.fault.isNone && sameCpu { t.cpu with ms := none } cpu &&
+        t.events == [prior,.memory .read address [0x11,0x22] false]))) = true := by decide
+
+-- Invalid encodings/ASTs are refused before looking up capabilities.
+example : ([.shift .shl .q (.imm 0) (.imm8 1), .rot .ror .q (.imm 0) (.imm8 1),
+    .dshift .shld .b memory .rcx (.imm8 1), .dshift .shrd .q (.imm 0) .rcx (.imm8 1),
+    .shiftx .shl .w .rax memory .rcx, .rorx .w .rax memory 1, .bzhi .w .rax memory .rcx,
+    .andn .b .rax .rcx memory, .mulx .w .rax .rdx memory,
+    .bitcnt .popcnt .b .rax memory, .bitcnt .blsi .w .rax memory,
+    .imulr .b .rax memory none, .muldiv .div .q (.imm 0),
+    .movbe .b (.reg .rax) memory, .movbe .q (.reg .rax) (.reg .rdx),
+    .movbe .q memory memory] : List Op).all (fun op => [false,true].all (fun bound =>
+      let cpu := entry address initial
+      let p : MemoryProfile := { readable := fun _ => false, writable := fun _ => false }
+      let t := stepChecked { op, len := 3 }
+        { cpu, profile := if bound then some p else none, events := [prior] }
+      (match t.cpu.ms with | some (.illegalOperands _) => true | _ => false) &&
+      sameCpu { t.cpu with ms := none } cpu && t.fault.isNone && t.events == [prior])) = true := by decide
+
+-- Independent quotient/remainder goldens, including AX byte pairing, source
+-- permission priority, zero divisor, and signed/unsigned quotient overflow.
+private def divide (sz : Size) (signed : Bool) (scene : Nat) (mem : Bool) (mode : Nat) : Bool :=
+  let mask : Val := BitVec.ofNat 64 (2^sz.bits-1)
+  let negative : Val := mask - 12
+  let lo : Val := if scene == 0 then (if signed then negative else 13)
+    else if scene == 2 && signed then BitVec.ofNat 64 (2^(sz.bits-1)) else 0
+  let hi : Val := if scene == 0 && signed || scene == 2 && signed then mask
+    else if scene == 2 then 1 else 0
+  let divisor : Val := if scene == 1 then 0 else if scene == 2 then (if signed then mask else 1) else 3
+  let cpu := ((entry address divisor).setMdPair sz lo hi).setReg .q .rcx divisor
+  let src : Operand := if mem then memory else .reg .rcx
+  let i : Instr := { op := .muldiv (if signed then .idiv else .div) sz src, len := 3 }
+  let p : MemoryProfile :=
+    { readable := fun a => !(mode == 1 && a == address + BitVec.ofNat 64 (sz.bytes-1)),
+      writable := fun _ => false, initialized := fun _ => true }
+  let t := stepChecked i { cpu, profile := if mode == 2 then none else some p, events := [prior] }
+  let missing := mem && mode == 2
+  let denied := mem && mode == 1
+  let fault := if denied then some (ExecutionFault.read address sz.bytes)
+    else if !missing && scene != 0 then some .divideError else none
+  let events := [prior] ++ (if mem && !missing && !denied then
+    [.memory .read address (bytes sz.bytes divisor) true] else []) ++
+    (match fault with | none => [] | some f => [.fault f])
+  t.fault == fault && t.events == events &&
+  if missing then (match t.cpu.ms with | some (.unimplemented _) => true | _ => false) &&
+    sameCpu { t.cpu with ms := none } cpu
+  else t.cpu.ms.isNone && if fault.isSome then sameCpu t.cpu cpu
+    else sameCpu t.cpu (step i cpu) &&
+      t.cpu.getReg sz .rax == (if signed then mask-3 else 4) &&
+      t.cpu.mdHi sz == (if signed then mask else 1)
+
+example : [Size.b,.w,.d,.q].all (fun sz => [false,true].all (fun signed =>
+    (List.range 3).all (fun scene => [false,true].all (fun mem =>
+      (List.range 3).all (divide sz signed scene mem))))) = true := by decide
+
+-- Multiplication shares the pair calculation too; it must not become a #DE.
+example : [Size.b,.w,.d,.q].all (fun sz => [MulDivKind.mul,.imul].all (fun k =>
+    let cpu := ((entry address 3).setMdPair sz 7 0)
+    let p : MemoryProfile := { initialized := fun _ => true }
+    let i : Instr := { op := .muldiv k sz memory, len := 3 }
+    let t := stepChecked i { cpu, profile := some p, events := [prior] }
+    t.cpu.ms.isNone && t.fault.isNone && sameCpu t.cpu (step i cpu) &&
+    t.cpu.getReg sz .rax == 21 && t.cpu.mdHi sz == 0 &&
+    t.events == [prior,.memory .read address (bytes sz.bytes 3) true])) = true := by decide
+
 end X86.Tests.CheckedAccess

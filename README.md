@@ -281,11 +281,19 @@ initialize their exact wrapping byte range. These are flat-memory faults and
 effects, without page tables, CR2/error codes or exception entry.
 
 Supported classes are MOV, ordinary binary/unary arithmetic (including
-CMP/TEST), extending loads, CMOV and SETcc; LEA and NOP need no memory access.
-CMOV reads a memory source even when its condition is false. UD2 and illegal
-LOCK uses have a typed invalid-opcode outcome. Missing profiles and unported
-classes produce `MsErr` model refusals, with no total-memory fallback. In
-particular, stack/control transfers, shifts/rotates, strings, vector accesses
+CMP/TEST), extending loads, CMOV, SETcc, shifts/rotations/double shifts, flagless
+shifts/rotations, MOVBE, bit counts/scans, BZHI, ANDN, IMUL and MUL/DIV/MULX.
+BSWAP, LEA and NOP need no memory access. Zero-count memory shifts/rotations
+retain the numeric step's read-modify-write behavior, including write-permission
+checks and initialization. The existing double-shift undefined-memory result
+refusal retains its read prefix and does not invent a store.
+
+CMOV reads a memory source even when its condition is false. After successful
+DIV/IDIV operand access, the original shared division helper determines a typed
+divide-error outcome (zero divisor or quotient overflow), preserving the CPU
+and read prefix. UD2 and illegal LOCK uses have a typed invalid-opcode outcome.
+Missing profiles and unported classes produce `MsErr` model refusals, with no
+total-memory fallback. Stack/control transfers, bit-test/string/vector accesses
 and atomic/LOCK operations remain unported to this optional entry point.
 `Tests.CheckedAccess` checks ordered faults/effects and both numerical-step
 agreement and independent load/store values using kernel `decide`.
